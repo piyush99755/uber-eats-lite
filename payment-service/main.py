@@ -3,7 +3,7 @@ from uuid import uuid4
 from models import payments
 from schemas import PaymentCreate, Payment
 from database import database, metadata, engine
-from events import publish_event
+from events import publish_event  # <-- this must come from a separate events.py
 
 app = FastAPI(title="Payment Service")
 
@@ -22,7 +22,8 @@ async def create_payment(payment: PaymentCreate):
     query = payments.insert().values(id=payment_id, order_id=payment.order_id, amount=payment.amount)
     await database.execute(query)
     
-    await publish_event("payment.created", {
+    # Publish event
+    await publish_event({
         "id": payment_id,
         "order_id": payment.order_id,
         "amount": payment.amount

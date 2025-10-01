@@ -1,6 +1,7 @@
 import os
-import boto3
 import json
+import boto3
+import asyncio
 
 USE_AWS = os.getenv("USE_AWS", "False") == "True"
 
@@ -12,7 +13,7 @@ if USE_AWS:
 else:
     print("Running in local mode; events will be printed")
 
-def publish_payment_processed_event(payment_data: dict):
+async def publish_event(payment_data: dict):
     if USE_AWS:
         sqs.send_message(
             QueueUrl=QUEUE_URL,

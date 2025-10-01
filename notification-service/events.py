@@ -12,7 +12,7 @@ if USE_AWS:
 else:
     print("Running in local mode; events will be printed")
 
-def publish_notification_sent_event(notification_data: dict):
+def publish_event(notification_data: dict):
     if USE_AWS:
         sqs.send_message(
             QueueUrl=QUEUE_URL,
