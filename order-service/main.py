@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from uuid import uuid4
 from models import orders
-from schemas import Order, OrderCreate
+from schemas import OrderCreate, Order
 from database import database, metadata, engine
+from events import publish_event
 
 app = FastAPI(title="Order Service")
 
@@ -18,17 +19,16 @@ async def shutdown():
 @app.post("/orders", response_model=Order)
 async def create_order(order: OrderCreate):
     order_id = str(uuid4())
-    query = orders.insert().values(id=order_id, user_id=order.user_id, items=order.items, status="pending")
+    query = orders.insert().values(id=order_id, user_id=order.user_id, total=order.total)
     await database.execute(query)
-    return Order(id=order_id, **order.dict(), status="pending")
-
-@app.get("/orders/{order_id}", response_model=Order)
-async def get_order(order_id: str):
-    query = orders.select().where(orders.c.id == order_id)
-    record = await database.fetch_one(query)
-    if not record:
-        raise HTTPException(status_code=404, detail="Order not found")
-    return Order(**record)
+    
+    await publish_event("order.created", {
+        "id": order_id,
+        "user_id": order.user_id,
+        "total": order.total
+    })
+    
+    return Order(id=order_id, **order.dict())
 
 @app.get("/health")
 def health():

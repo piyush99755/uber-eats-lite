@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException
-from schemas import NotificationCreate, Notification
-from models import notifications  # your SQLAlchemy table
-from database import database, metadata, engine
 from uuid import uuid4
+from models import notifications
+from schemas import NotificationCreate, Notification
+from database import database, metadata, engine
+from events import publish_event
 
 app = FastAPI(title="Notification Service")
 
@@ -18,16 +19,17 @@ async def shutdown():
 @app.post("/notifications", response_model=Notification)
 async def create_notification(notification: NotificationCreate):
     notification_id = str(uuid4())
-    query = notifications.insert().values(
-        id=notification_id,
-        title=notification.title,
-        message=notification.message,
-        user_id=notification.user_id
-    )
+    query = notifications.insert().values(id=notification_id, user_id=notification.user_id, message=notification.message)
     await database.execute(query)
+    
+    await publish_event("notification.created", {
+        "id": notification_id,
+        "user_id": notification.user_id,
+        "message": notification.message
+    })
+    
     return Notification(id=notification_id, **notification.dict())
 
-@app.get("/notifications")
-async def list_notifications():
-    query = notifications.select()
-    return await database.fetch_all(query)
+@app.get("/health")
+def health():
+    return {"status": "notification-service healthy"}
