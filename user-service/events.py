@@ -12,21 +12,22 @@ if USE_AWS:
 else:
     print("Running in local mode; events will be printed")
 
-def publish_event(user_data: dict):
+# Make this async
+async def publish_event(event_type: str, data: dict):
     if USE_AWS:
         sqs.send_message(
             QueueUrl=QUEUE_URL,
-            MessageBody=json.dumps(user_data)
+            MessageBody=json.dumps(data)
         )
         eventbridge.put_events(
             Entries=[
                 {
                     "Source": "user-service",
-                    "DetailType": "UserCreated",
-                    "Detail": json.dumps(user_data),
+                    "DetailType": event_type,
+                    "Detail": json.dumps(data),
                     "EventBusName": EVENT_BUS
                 }
             ]
         )
     else:
-        print("UserCreated event:", user_data)
+        print(f"{event_type} event:", data)

@@ -5,6 +5,11 @@ __pycache__/
 *.pyd
 */venv/
 
+# Virtual environments
+venv/
+*/venv/
+uber-env/
+
 # IDE
 .vscode/
 .idea/
@@ -16,6 +21,6 @@ Thumbs.db
 # Logs
 *.log
 
-*/venv/
-uber-env/
-
+# Environment variables
+.env
+.env.*
