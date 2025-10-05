@@ -1,32 +1,35 @@
 import os
-import boto3
 import json
+import boto3
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env variables
 
 USE_AWS = os.getenv("USE_AWS", "False") == "True"
 
 if USE_AWS:
-    sqs = boto3.client("sqs")
-    eventbridge = boto3.client("events")
+    sqs = boto3.client("sqs", region_name=os.getenv("AWS_REGION"))
+    eventbridge = boto3.client("events", region_name=os.getenv("AWS_REGION"))
     QUEUE_URL = os.getenv("NOTIFICATION_SERVICE_QUEUE")
     EVENT_BUS = os.getenv("EVENT_BUS_NAME")
 else:
     print("Running in local mode; events will be printed")
 
-def publish_event(notification_data: dict):
+
+async def publish_event(event_type: str, payload: dict):
+    """
+    Publish an event to AWS (SQS + EventBridge) or print locally.
+    """
     if USE_AWS:
-        sqs.send_message(
-            QueueUrl=QUEUE_URL,
-            MessageBody=json.dumps(notification_data)
-        )
         eventbridge.put_events(
             Entries=[
                 {
                     "Source": "notification-service",
-                    "DetailType": "NotificationSent",
-                    "Detail": json.dumps(notification_data),
+                    "DetailType": event_type,
+                    "Detail": json.dumps(payload),
                     "EventBusName": EVENT_BUS
                 }
             ]
         )
     else:
-        print("NotificationSent event:", notification_data)
+        print(f"{event_type} event:", payload)

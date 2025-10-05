@@ -1,11 +1,12 @@
-from sqlalchemy import Table, Column, String, MetaData
-
-metadata = MetaData()
+from sqlalchemy import Table, Column, String
+from database import metadata  # Use the same metadata as database.py
 
 notifications = Table(
     "notifications",
     metadata,
     Column("id", String, primary_key=True),
-    Column("user_id", String),
-    Column("message", String),
+    Column("user_id", String, nullable=False),
+    Column("order_id", String, nullable=False),
+    Column("title", String, nullable=False),
+    Column("message", String, nullable=False)
 )
