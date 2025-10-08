@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
+
 # Check if running in AWS or local mode
 USE_AWS = os.getenv("USE_AWS", "False") == "True"
 
@@ -34,6 +36,13 @@ async def publish_event(event_type: str, payload: dict):
                 QueueUrl=QUEUE_URL,
                 MessageBody=json.dumps(payload)
             )
+            
+             # Send same event to driver-service queue
+            sqs.send_message(
+                QueueUrl=DRIVER_QUEUE_URL,
+                MessageBody=json.dumps({"type": event_type, "data": payload})
+            )
+
 
             # Send event to EventBridge
             eventbridge.put_events(

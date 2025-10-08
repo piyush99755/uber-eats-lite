@@ -8,4 +8,7 @@ class OrderCreate(BaseModel):
 class Order(OrderCreate):
     id: str
     status: str
+    
+class AssignDriver(BaseModel):
+    driver_id: str
 

@@ -8,7 +8,8 @@ orders = Table(
     Column("user_id", String, nullable=False),
     Column("items", String, nullable=False),
     Column("total", Float, nullable=False),
-    Column("status", String, default="pending")
+    Column("status", String, default="pending"),
+    Column("driver_id", String, nullable=True)
 )
 
 # Create tables
