@@ -5,80 +5,111 @@ import uuid
 from datetime import datetime
 from dotenv import load_dotenv
 from database import database
-from models import event_logs  # Import the table
+from models import event_logs  # Event logs table
 
-# Load environment variables from .env file
+# -----------------------------
+# Load environment variables
+# -----------------------------
 load_dotenv()
 
-DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
-
-# Check if running in AWS or local mode
 USE_AWS = os.getenv("USE_AWS", "False") == "True"
 
+# SQS Queues
+ORDER_SERVICE_QUEUE = os.getenv("ORDER_SERVICE_QUEUE")
+DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
+NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
+
+# EventBridge Bus
+EVENT_BUS = os.getenv("EVENT_BUS_NAME")
+
+# -----------------------------
+# Validate URLs in AWS mode
+# -----------------------------
 if USE_AWS:
+    missing_queues = []
+    if not ORDER_SERVICE_QUEUE:
+        missing_queues.append("ORDER_SERVICE_QUEUE")
+    if not DRIVER_QUEUE_URL:
+        missing_queues.append("DRIVER_QUEUE_URL")
+    if not NOTIFICATION_QUEUE_URL:
+        missing_queues.append("NOTIFICATION_QUEUE_URL")
+    if not EVENT_BUS:
+        missing_queues.append("EVENT_BUS_NAME")
+
+    if missing_queues:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing_queues)}")
+
     # Create AWS clients
     sqs = boto3.client("sqs", region_name=os.getenv("AWS_REGION"))
     eventbridge = boto3.client("events", region_name=os.getenv("AWS_REGION"))
-
-    # Required env vars
-    QUEUE_URL = os.getenv("ORDER_SERVICE_QUEUE")
-    EVENT_BUS = os.getenv("EVENT_BUS_NAME")
 else:
-    print("Running in local mode; events will be printed")
+    print("[LOCAL MODE] Running locally, events will be printed only.")
 
-
+# -----------------------------
+# Publish event function
+# -----------------------------
 async def publish_event(event_type: str, payload: dict):
     """
-    Publish an event to AWS (SQS + EventBridge) or print locally.
-    Also logs the event to the database for observability.
-    :param event_type: The event type (e.g., 'order.created').
-    :param payload: The event payload dictionary.
+    Publish an event to Notification and Driver SQS queues, log to DB,
+    and optionally send to EventBridge.
     """
     event_id = str(uuid.uuid4())
-    event_entry = {
-        "id": event_id,
-        "event_type": event_type,
-        "payload": payload,
-        "source": "order-service",
-        "created_at": datetime.utcnow()
-    }
 
-    # Log event to DB
+    # 1️⃣ Log event to DB
     try:
-        query = event_logs.insert().values(**event_entry)
-        await database.execute(query)
+        await database.execute(
+            event_logs.insert().values(
+                id=event_id,
+                event_type=event_type,
+                payload=payload,
+                source="order-service",
+                created_at=datetime.utcnow()
+            )
+        )
         print(f"[EVENT LOGGED] {event_type} -> {event_id}")
     except Exception as e:
         print(f"[WARN] Failed to log event in DB: {e}")
 
-    # Publish event to AWS or print locally
+    # 2️⃣ Send message to AWS SQS
     if USE_AWS:
-        try:
-            # Send message to order-service SQS
-            sqs.send_message(
-                QueueUrl=QUEUE_URL,
-                MessageBody=json.dumps(payload)
-            )
+        for queue_name, queue_url in [
+            ("Notification Queue", NOTIFICATION_QUEUE_URL),
+            ("Driver Queue", DRIVER_QUEUE_URL)
+        ]:
+            if not queue_url:
+                print(f"[WARN] {queue_name} URL not set, skipping...")
+                continue
+            try:
+                sqs.send_message(
+                    QueueUrl=queue_url,
+                    MessageBody=json.dumps({
+                        "type": event_type,
+                        "data": payload
+                    })
+                )
+                print(f"[EVENT SENT] {event_type} -> {event_id} to {queue_name} ({queue_url})")
+            except Exception as e:
+                print(f"[ERROR] Failed to send event to {queue_name} ({queue_url}): {e}")
 
-            # Send message to driver-service SQS
-            sqs.send_message(
-                QueueUrl=DRIVER_QUEUE_URL,
-                MessageBody=json.dumps({"type": event_type, "data": payload})
-            )
+        # 3️⃣ Send to EventBridge
+        if EVENT_BUS:
+            try:
+                eventbridge.put_events(
+                    Entries=[{
+                        "Source": "order-service",
+                        "DetailType": event_type,
+                        "Detail": json.dumps(payload),
+                        "EventBusName": EVENT_BUS
+                    }]
+                )
+                print(f"[EVENT SENT] {event_type} -> {event_id} to EventBridge")
+            except Exception as e:
+                print(f"[ERROR] Failed to send to EventBridge: {e}")
+        else:
+            print("[WARN] EVENT_BUS_NAME not set, skipping EventBridge publish.")
 
-            # Send to EventBridge
-            eventbridge.put_events(
-                Entries=[{
-                    "Source": "order-service",
-                    "DetailType": event_type,
-                    "Detail": json.dumps(payload),
-                    "EventBusName": EVENT_BUS
-                }]
-            )
-            print(f"[EVENT SENT] {event_type} -> {event_id}")
-        except Exception as e:
-            print(f"[ERROR] Failed to publish event: {e}")
     else:
+        # Local mode: just print
         print(f"[LOCAL EVENT] {event_type}: {payload}")
 
     return event_id

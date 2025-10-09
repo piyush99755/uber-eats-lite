@@ -7,7 +7,6 @@ from database import database
 from models import orders
 from events import publish_event
 
-
 load_dotenv()
 
 USE_AWS = os.getenv("USE_AWS", "False") == "True"
@@ -33,14 +32,24 @@ async def handle_driver_assigned(event_data: dict):
         print("[WARN] Missing order_id or driver_id in driver.assigned event")
         return
 
-    query = orders.update().where(orders.c.id == order_id).values(driver_id=driver_id)
+    # Update order record
+    query = orders.update().where(orders.c.id == order_id).values(
+        driver_id=driver_id,
+        status="assigned"
+    )
     await database.execute(query)
+
+    # Log event for audit
+    await publish_event("driver.assigned", {
+        "order_id": order_id,
+        "driver_id": driver_id
+    })
 
     print(f"[Order Updated] Order {order_id} assigned to driver {driver_id}")
 
 
 # -------------------------------
-# Poll messages from SQS or local simulation
+# Poll messages from SQS or simulate locally
 # -------------------------------
 async def poll_messages():
     if USE_AWS:
@@ -75,7 +84,10 @@ async def poll_messages():
             except Exception as e:
                 print(f"[Consumer Error] {e}")
                 await asyncio.sleep(5)
+
     else:
-        print("[Consumer] Local mode: waiting for driver.assigned events...")
+        print("[Consumer] Local mode active — simulating driver.assigned events...")
         while True:
             await asyncio.sleep(15)
+           
+            # await handle_driver_assigned({"order_id": "test123", "driver_id": "local-driver"})
