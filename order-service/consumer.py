@@ -3,64 +3,52 @@ import json
 import os
 import boto3
 from dotenv import load_dotenv
-
 from database import database
-from models import drivers
+from models import orders
 from events import publish_event
+
 
 load_dotenv()
 
-USE_AWS = os.getenv("USE_AWS", "False").lower() == "true"
+USE_AWS = os.getenv("USE_AWS", "False") == "True"
 
 if USE_AWS:
-    ORDER_QUEUE_URL = os.getenv("DRIVER_SERVICE_QUEUE")
+    DRIVER_QUEUE_URL = os.getenv("ORDER_SERVICE_QUEUE")  # messages from driver-service
     sqs = boto3.client("sqs")
 else:
     print("[Consumer] Running in local mode; events will be simulated.")
 
-# -------------------------------
-# Event handler: order.created
-# -------------------------------
-async def handle_order_created(event_data: dict):
-    """
-    Assign an available driver to an order and publish driver.assigned.
-    """
-    # Find an available driver
-    query = drivers.select().where(drivers.c.status == "available")
-    available_drivers = await database.fetch_all(query)
 
-    if not available_drivers:
-        print("No available drivers available.")
+# -------------------------------
+# Event handler: driver.assigned
+# -------------------------------
+async def handle_driver_assigned(event_data: dict):
+    """
+    Update the order with assigned driver when driver.assigned event is received.
+    """
+    order_id = event_data.get("order_id")
+    driver_id = event_data.get("driver_id")
+
+    if not order_id or not driver_id:
+        print("[WARN] Missing order_id or driver_id in driver.assigned event")
         return
 
-    driver = available_drivers[0]
-    driver_id = driver["id"]
-    order_id = event_data["id"]
-    user_id = event_data.get("user_id")
+    query = orders.update().where(orders.c.id == order_id).values(driver_id=driver_id)
+    await database.execute(query)
 
-    # Update driver status → busy
-    update_query = drivers.update().where(drivers.c.id == driver_id).values(status="busy")
-    await database.execute(update_query)
+    print(f"[Order Updated] Order {order_id} assigned to driver {driver_id}")
 
-    print(f"[Driver Assigned] Driver {driver_id} assigned to order {order_id}")
-
-    # Publish driver.assigned event
-    await publish_event("driver.assigned", {
-        "order_id": order_id,
-        "driver_id": driver_id,
-        "user_id": user_id
-    })
 
 # -------------------------------
 # Poll messages from SQS or local simulation
 # -------------------------------
 async def poll_messages():
     if USE_AWS:
-        print("[Consumer] Starting AWS SQS polling...")
+        print("[Consumer] Starting AWS SQS polling for driver.assigned...")
         while True:
             try:
                 response = sqs.receive_message(
-                    QueueUrl=ORDER_QUEUE_URL,
+                    QueueUrl=DRIVER_QUEUE_URL,
                     MaxNumberOfMessages=5,
                     WaitTimeSeconds=5
                 )
@@ -75,20 +63,19 @@ async def poll_messages():
                     event_type = body.get("type")
                     event_data = body.get("data", {})
 
-                    if event_type == "order.created":
-                        await handle_order_created(event_data)
+                    if event_type == "driver.assigned":
+                        await handle_driver_assigned(event_data)
 
                     # Delete message after processing
                     sqs.delete_message(
-                        QueueUrl=ORDER_QUEUE_URL,
+                        QueueUrl=DRIVER_QUEUE_URL,
                         ReceiptHandle=msg["ReceiptHandle"]
                     )
 
             except Exception as e:
                 print(f"[Consumer Error] {e}")
                 await asyncio.sleep(5)
-
     else:
-        print("[Consumer] Local mode: waiting for order.created events...")
+        print("[Consumer] Local mode: waiting for driver.assigned events...")
         while True:
             await asyncio.sleep(15)

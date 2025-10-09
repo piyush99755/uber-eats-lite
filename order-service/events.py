@@ -1,7 +1,11 @@
 import os
 import boto3
 import json
+import uuid
+from datetime import datetime
 from dotenv import load_dotenv
+from database import database
+from models import event_logs  # Import the table
 
 # Load environment variables from .env file
 load_dotenv()
@@ -26,25 +30,43 @@ else:
 async def publish_event(event_type: str, payload: dict):
     """
     Publish an event to AWS (SQS + EventBridge) or print locally.
+    Also logs the event to the database for observability.
     :param event_type: The event type (e.g., 'order.created').
     :param payload: The event payload dictionary.
     """
+    event_id = str(uuid.uuid4())
+    event_entry = {
+        "id": event_id,
+        "event_type": event_type,
+        "payload": payload,
+        "source": "order-service",
+        "created_at": datetime.utcnow()
+    }
+
+    # Log event to DB
+    try:
+        query = event_logs.insert().values(**event_entry)
+        await database.execute(query)
+        print(f"[EVENT LOGGED] {event_type} -> {event_id}")
+    except Exception as e:
+        print(f"[WARN] Failed to log event in DB: {e}")
+
+    # Publish event to AWS or print locally
     if USE_AWS:
         try:
-            # Send message to SQS
+            # Send message to order-service SQS
             sqs.send_message(
                 QueueUrl=QUEUE_URL,
                 MessageBody=json.dumps(payload)
             )
-            
-             # Send same event to driver-service queue
+
+            # Send message to driver-service SQS
             sqs.send_message(
                 QueueUrl=DRIVER_QUEUE_URL,
                 MessageBody=json.dumps({"type": event_type, "data": payload})
             )
 
-
-            # Send event to EventBridge
+            # Send to EventBridge
             eventbridge.put_events(
                 Entries=[{
                     "Source": "order-service",
@@ -53,8 +75,10 @@ async def publish_event(event_type: str, payload: dict):
                     "EventBusName": EVENT_BUS
                 }]
             )
-            print(f"Event published to AWS: {event_type}")
+            print(f"[EVENT SENT] {event_type} -> {event_id}")
         except Exception as e:
-            print(f"Failed to publish event: {e}")
+            print(f"[ERROR] Failed to publish event: {e}")
     else:
-        print(f"{event_type} event:", payload)
+        print(f"[LOCAL EVENT] {event_type}: {payload}")
+
+    return event_id

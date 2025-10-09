@@ -1,35 +1,40 @@
+import asyncio
 from fastapi import FastAPI
 from uuid import uuid4
+from typing import List, Optional
+
+from database import database, metadata, engine
 from models import drivers
 from schemas import DriverCreate, Driver
-from database import database, metadata, engine
 from events import publish_event
-from typing import List
-from typing import Optional
+from consumer import poll_messages  # background consumer
 
 app = FastAPI(title="Driver Service")
 
-# Startup: connect to DB and create tables
+# ------------------------
+# Startup & Shutdown
+# ------------------------
 @app.on_event("startup")
 async def startup():
     await database.connect()
     metadata.create_all(engine)
+    # Start consumer in background
+    asyncio.create_task(poll_messages())
 
-# Shutdown: disconnect DB
 @app.on_event("shutdown")
 async def shutdown():
     await database.disconnect()
-    
+
+# ------------------------
+# Driver Endpoints
+# ------------------------
 @app.get("/drivers", response_model=List[Driver])
 async def list_drivers(status: Optional[str] = None):
     query = drivers.select()
     if status:
         query = query.where(drivers.c.status == status)
-    driver_list = await database.fetch_all(query)
-    return driver_list
+    return await database.fetch_all(query)
 
-
-# Create driver endpoint
 @app.post("/drivers", response_model=Driver)
 async def create_driver(driver: DriverCreate):
     driver_id = str(uuid4())
@@ -52,7 +57,6 @@ async def create_driver(driver: DriverCreate):
 
     return Driver(id=driver_id, status="available", **driver.dict())
 
-# Health check
 @app.get("/health")
-def health():
+async def health():
     return {"status": "driver-service healthy"}
