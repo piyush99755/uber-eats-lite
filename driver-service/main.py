@@ -4,6 +4,8 @@ from models import drivers
 from schemas import DriverCreate, Driver
 from database import database, metadata, engine
 from events import publish_event
+from typing import List
+from typing import Optional
 
 app = FastAPI(title="Driver Service")
 
@@ -17,6 +19,15 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     await database.disconnect()
+    
+@app.get("/drivers", response_model=List[Driver])
+async def list_drivers(status: Optional[str] = None):
+    query = drivers.select()
+    if status:
+        query = query.where(drivers.c.status == status)
+    driver_list = await database.fetch_all(query)
+    return driver_list
+
 
 # Create driver endpoint
 @app.post("/drivers", response_model=Driver)

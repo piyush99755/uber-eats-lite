@@ -45,6 +45,7 @@ async def create_order(order: OrderCreate):
 
     return Order(id=order_id, status="pending", **order.dict())
 
+
 # ------------------------
 # Assign Driver endpoint
 # ------------------------
