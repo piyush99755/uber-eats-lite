@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+import os
 from fastapi import FastAPI
 from database import database, metadata, engine
 from models import notifications
@@ -9,28 +10,35 @@ from consumer import poll_sqs
 
 app = FastAPI(title="Notification Service")
 
-# -------------------
-# DB & Startup
-# -------------------
+USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
+_sqs_task: asyncio.Task | None = None  # Keep track of polling task
+
+
 @app.on_event("startup")
 async def startup():
     await database.connect()
     metadata.create_all(engine)
 
-    # Start background consumer task
-    asyncio.create_task(poll_sqs())
-    print("[Notification Service] Started successfully.")
+    global _sqs_task
+    if USE_AWS and (_sqs_task is None or _sqs_task.done()):
+        _sqs_task = asyncio.create_task(poll_sqs())
+        print("[Notification Service] AWS mode — SQS polling started.")
+    else:
+        print("[Notification Service] Local mode — no SQS polling.")
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    if USE_AWS and _sqs_task and not _sqs_task.done():
+        _sqs_task.cancel()
+        try:
+            await _sqs_task
+        except asyncio.CancelledError:
+            print("[Notification Service] SQS polling task cancelled.")
     await database.disconnect()
     print("[Notification Service] Shutdown complete.")
 
 
-# -------------------
-# API Endpoints
-# -------------------
 @app.post("/notifications", response_model=Notification)
 async def create_notification_api(notification: NotificationCreate):
     """Manually create a notification (for testing)."""
@@ -43,7 +51,6 @@ async def create_notification_api(notification: NotificationCreate):
     )
     await database.execute(query)
 
-    # Publish notification.created event
     await publish_event("notification.created", {
         "id": notification_id,
         "user_id": notification.user_id,

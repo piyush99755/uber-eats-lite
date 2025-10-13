@@ -55,7 +55,7 @@ async def publish_event(event_type: str, payload: dict):
     """
     event_id = str(uuid.uuid4())
 
-    # 1️⃣ Log event to DB
+    # Log event to DB
     try:
         await database.execute(
             event_logs.insert().values(
@@ -70,7 +70,7 @@ async def publish_event(event_type: str, payload: dict):
     except Exception as e:
         print(f"[WARN] Failed to log event in DB: {e}")
 
-    # 2️⃣ Send message to AWS SQS
+    # Send message to AWS SQS
     if USE_AWS:
         for queue_name, queue_url in [
             ("Notification Queue", NOTIFICATION_QUEUE_URL),
@@ -91,7 +91,7 @@ async def publish_event(event_type: str, payload: dict):
             except Exception as e:
                 print(f"[ERROR] Failed to send event to {queue_name} ({queue_url}): {e}")
 
-        # 3️⃣ Send to EventBridge
+        # Send to EventBridge
         if EVENT_BUS:
             try:
                 eventbridge.put_events(
