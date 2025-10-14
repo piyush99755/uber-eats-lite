@@ -1,80 +1,88 @@
 import os
 import json
+import asyncio
 import aioboto3
 from dotenv import load_dotenv
-from database import database
 from datetime import datetime
-import uuid
 
 load_dotenv()
 
 USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
-DRIVER_QUEUE_URL = os.getenv("DRIVER_SERVICE_QUEUE")
-EVENT_BUS = os.getenv("EVENT_BUS_NAME")
+
+# Create reusable AWS session
+session = aioboto3.Session()
 
 
-async def publish_event(event_type: str, payload: dict):
+async def handle_event(event_type: str, data: dict):
     """
-    Publish an event to Notification & Driver SQS queues and EventBridge asynchronously,
-    and log to DB.
+    Generic event handler that prints notifications for all service events.
     """
-    event_id = str(uuid.uuid4())
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Log event to DB
-    try:
-        await database.execute(
-            event_logs.insert().values(
-                id=event_id,
-                event_type=event_type,
-                payload=payload,
-                source="order-service",
-                created_at=datetime.utcnow()
-            )
-        )
-        print(f"[EVENT LOGGED] {event_type} -> {event_id}")
-    except Exception as e:
-        print(f"[WARN] Failed to log event in DB: {e}")
+    # Universal print for all events
+    print(f"\n[NOTIFY] 🕒 {timestamp} | Event: {event_type}")
+    print(f"[NOTIFY] 📦 Payload: {json.dumps(data, indent=2)}")
 
-    if USE_AWS:
-        session = aioboto3.Session()
-        try:
-            # Send to Notification Queue
-            async with session.client("sqs", region_name=AWS_REGION) as sqs:
-                if NOTIFICATION_QUEUE_URL:
-                    await sqs.send_message(
-                        QueueUrl=NOTIFICATION_QUEUE_URL,
-                        MessageBody=json.dumps({"type": event_type, "data": payload})
-                    )
-                    print(f"[EVENT SENT] {event_type} -> {event_id} to Notification Queue")
-                
-                # Send to Driver Queue
-                if DRIVER_QUEUE_URL:
-                    await sqs.send_message(
-                        QueueUrl=DRIVER_QUEUE_URL,
-                        MessageBody=json.dumps({"type": event_type, "data": payload})
-                    )
-                    print(f"[EVENT SENT] {event_type} -> {event_id} to Driver Queue")
-
-            # Send to EventBridge
-            if EVENT_BUS:
-                async with session.client("events", region_name=AWS_REGION) as eventbridge:
-                    await eventbridge.put_events(
-                        Entries=[{
-                            "Source": "order-service",
-                            "DetailType": event_type,
-                            "Detail": json.dumps(payload),
-                            "EventBusName": EVENT_BUS
-                        }]
-                    )
-                    print(f"[EVENT SENT] {event_type} -> {event_id} to EventBridge")
-
-        except Exception as e:
-            print(f"[ERROR] Failed to publish event: {e}")
-
+    # Custom reactions per event type (optional)
+    if event_type == "payment.processed":
+        print(f"[NOTIFY] 💰 Payment paid for order {data['order_id']} by user {data['user_id']} (Amount: ${data['amount']})")
+    elif event_type == "order.created":
+        print(f"[NOTIFY] 🛒 New order created by user {data['user_id']} for item(s): {data['items']}")
+    elif event_type == "driver.assigned":
+        print(f"[NOTIFY] 🚗 Driver {data.get('driver_id', 'N/A')} assigned to order {data.get('order_id', 'N/A')}")
+    elif event_type == "user.created":
+        print(f"[NOTIFY] 👤 New user registered: {data.get('user_id', 'Unknown')}")
     else:
-        # Local mode fallback
-        print(f"[LOCAL EVENT] {event_type}: {payload}")
+        print(f"[NOTIFY] 🔔 Unrecognized event type: {event_type}")
 
-    return event_id
+    print("-" * 80)
+
+
+async def poll_notifications():
+    """
+    Poll Notification SQS for all incoming messages.
+    """
+    if not USE_AWS:
+        print("[Notification Service] Local mode — skipping SQS polling.")
+        while True:
+            await asyncio.sleep(10)
+        return
+
+    print(f"[Notification Service] AWS mode — SQS polling started.")
+    print(f"[Notification Service] Polling SQS: {NOTIFICATION_QUEUE_URL}")
+
+    async with session.client("sqs", region_name=AWS_REGION) as sqs:
+        while True:
+            try:
+                response = await sqs.receive_message(
+                    QueueUrl=NOTIFICATION_QUEUE_URL,
+                    MaxNumberOfMessages=5,
+                    WaitTimeSeconds=10
+                )
+                messages = response.get("Messages", [])
+
+                if not messages:
+                    await asyncio.sleep(2)
+                    continue
+
+                for msg in messages:
+                    try:
+                        body = json.loads(msg["Body"])
+                        event_type = body.get("type", "unknown")
+                        data = body.get("data", {})
+
+                        await handle_event(event_type, data)
+
+                        # Delete after processing
+                        await sqs.delete_message(
+                            QueueUrl=NOTIFICATION_QUEUE_URL,
+                            ReceiptHandle=msg["ReceiptHandle"]
+                        )
+                    except Exception as e:
+                        print(f"[ERROR] Failed to process message: {e}")
+
+            except Exception as e:
+                print(f"[ERROR] Polling failed: {e}")
+                await asyncio.sleep(5)

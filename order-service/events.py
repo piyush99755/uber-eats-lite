@@ -18,7 +18,7 @@ USE_AWS = os.getenv("USE_AWS", "False") == "True"
 ORDER_SERVICE_QUEUE = os.getenv("ORDER_SERVICE_QUEUE")
 DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
 NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
-
+PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL") 
 # EventBridge Bus
 EVENT_BUS = os.getenv("EVENT_BUS_NAME")
 
@@ -33,6 +33,8 @@ if USE_AWS:
         missing_queues.append("DRIVER_QUEUE_URL")
     if not NOTIFICATION_QUEUE_URL:
         missing_queues.append("NOTIFICATION_QUEUE_URL")
+    if not PAYMENT_QUEUE_URL:
+        missing_queues.append("PAYMENT_QUEUE_URL") 
     if not EVENT_BUS:
         missing_queues.append("EVENT_BUS_NAME")
 
@@ -50,8 +52,8 @@ else:
 # -----------------------------
 async def publish_event(event_type: str, payload: dict):
     """
-    Publish an event to Notification and Driver SQS queues, log to DB,
-    and optionally send to EventBridge.
+    Publish an event to Notification, Driver, and Payment SQS queues,
+    log to DB, and optionally send to EventBridge.
     """
     event_id = str(uuid.uuid4())
 
@@ -74,7 +76,8 @@ async def publish_event(event_type: str, payload: dict):
     if USE_AWS:
         for queue_name, queue_url in [
             ("Notification Queue", NOTIFICATION_QUEUE_URL),
-            ("Driver Queue", DRIVER_QUEUE_URL)
+            ("Driver Queue", DRIVER_QUEUE_URL),
+            ("Payment Queue", PAYMENT_QUEUE_URL) 
         ]:
             if not queue_url:
                 print(f"[WARN] {queue_name} URL not set, skipping...")
@@ -107,7 +110,6 @@ async def publish_event(event_type: str, payload: dict):
                 print(f"[ERROR] Failed to send to EventBridge: {e}")
         else:
             print("[WARN] EVENT_BUS_NAME not set, skipping EventBridge publish.")
-
     else:
         # Local mode: just print
         print(f"[LOCAL EVENT] {event_type}: {payload}")

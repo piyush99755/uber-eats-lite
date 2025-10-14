@@ -5,7 +5,6 @@ from fastapi import FastAPI
 from database import database, metadata, engine
 from models import notifications
 from schemas import NotificationCreate, Notification
-from events import publish_event
 from consumer import poll_sqs
 
 app = FastAPI(title="Notification Service")

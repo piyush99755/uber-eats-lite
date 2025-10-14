@@ -1,12 +1,8 @@
-import asyncio
 import os
 import json
-import uuid
+import asyncio
 from dotenv import load_dotenv
 import aioboto3
-from database import database
-from models import notifications
-from events import publish_event
 
 load_dotenv()
 
@@ -14,109 +10,89 @@ USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
 QUEUE_URL = os.getenv("NOTIFICATION_SERVICE_QUEUE")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# In-memory deduplication set
+session = aioboto3.Session()
+
+# In-memory set to track processed event IDs and prevent duplicates
 processed_events = set()
 
+# -------------------------------
+# Event Handlers
+# -------------------------------
+async def handle_user_created(data: dict):
+    print(f"[NOTIFY] 👤 User created: {data.get('id')} - {data.get('name')}")
 
-async def save_notification(user_id: str, title: str, message: str):
-    """Save notification in DB and publish notification.created event."""
-    notification_id = str(uuid.uuid4())
-    query = notifications.insert().values(
-        id=notification_id,
-        user_id=user_id,
-        title=title,
-        message=message
-    )
-    await database.execute(query)
+async def handle_driver_created(data: dict):
+    print(f"[NOTIFY] 🏎️ Driver created: {data.get('id')} - {data.get('name')} ({data.get('vehicle')})")
 
-    await publish_event("notification.created", {
-        "id": notification_id,
-        "user_id": user_id,
-        "title": title,
-        "message": message
-    })
+async def handle_order_created(data: dict):
+    print(f"[NOTIFY] 🛒 Order created: {data.get('id')} by user {data.get('user_id')} "
+          f"(Items: {data.get('items')}, Total: ${data.get('total')})")
 
-    print(f"[NOTIFY] 🔔 {title} for user {user_id}")
+async def handle_payment_processed(data: dict):
+    print(f"[NOTIFY] 💰 Payment paid for order {data.get('order_id')} by user {data.get('user_id')} "
+          f"(Amount: ${data.get('amount')})")
 
+async def handle_driver_assigned(data: dict):
+    print(f"[NOTIFY] 🚗 Driver assigned: {data.get('driver_id')} assigned to order {data.get('order_id')}")
 
-async def handle_event(event_type: str, event_data: dict):
-    """Handle incoming events and log to console with deduplication."""
-    event_id = event_data.get("id") or event_data.get("order_id") or str(uuid.uuid4())
+# Default handler for unknown events
+async def handle_unknown(event_type: str, data: dict):
+    print(f"[NOTIFY] {event_type.upper()} -> {json.dumps(data)}")
 
-    # Skip if we've already processed this event
-    if event_id in processed_events:
-        return
-    processed_events.add(event_id)
+# Map event types to handlers
+EVENT_HANDLERS = {
+    "user.created": handle_user_created,
+    "driver.created": handle_driver_created,
+    "order.created": handle_order_created,
+    "payment.processed": handle_payment_processed,
+    "driver.assigned": handle_driver_assigned
+}
 
-    if event_type == "order.created":
-        user_id = event_data.get("user_id")
-        order_id = event_data.get("id")
-        print(f"[NOTIFY] 🛒 New order {order_id} placed by user {user_id}")
-
-    elif event_type == "payment.processed":
-        order_id = event_data.get("order_id")
-        amount = event_data.get("amount")
-        print(f"[NOTIFY] 💰 Payment processed for order {order_id} (Amount: {amount})")
-
-    elif event_type == "driver.assigned":
-        order_id = event_data.get("order_id")
-        driver_id = event_data.get("driver_id")
-        print(f"[NOTIFY] 🚗 Driver {driver_id} assigned to order {order_id}")
-
-    elif event_type == "notification.created":
-        user_id = event_data.get("user_id")
-        title = event_data.get("title")
-        print(f"[NOTIFY] 🔔 Notification created for user {user_id}: {title}")
-
-    elif event_type == "user.created":
-        name = event_data.get("name")
-        print(f"[NOTIFY] 👋 Welcome new user: {name}!")
-
-    else:
-        print(f"[WARN] ⚠️ Unhandled event type: {event_type}")
-
-
+# -------------------------------
+# Poll SQS and process events
+# -------------------------------
 async def poll_sqs():
-    """Continuously poll Notification SQS for new messages with async client."""
     if not USE_AWS:
-        print("[Consumer] Local mode active — waiting for simulated events...")
+        print("[Notification Service] Local mode — waiting for events...")
         while True:
             await asyncio.sleep(10)
         return
 
-    session = aioboto3.Session()
     async with session.client("sqs", region_name=AWS_REGION) as sqs:
-        print("[Notification Consumer] AWS mode enabled, polling SQS...")
+        print(f"[Notification Service] Polling SQS: {QUEUE_URL}")
+
         while True:
             try:
-                response = await sqs.receive_message(
+                resp = await sqs.receive_message(
                     QueueUrl=QUEUE_URL,
                     MaxNumberOfMessages=5,
-                    WaitTimeSeconds=10,
-                    MessageAttributeNames=["All"]
+                    WaitTimeSeconds=10
                 )
-                messages = response.get("Messages", [])
-
-                if not messages:
-                    await asyncio.sleep(2)
-                    continue
+                messages = resp.get("Messages", [])
 
                 for msg in messages:
                     try:
                         body = json.loads(msg["Body"])
+                        event_type = body.get("type", "unknown")
+                        data = body.get("data", {})
 
-                        # Handle EventBridge wrapped messages
-                        if "detail-type" in body and "detail" in body:
-                            event_type = body["detail-type"]
-                            event_data = body["detail"]
-                            if isinstance(event_data, str):
-                                event_data = json.loads(event_data)
+                        # Use event_id for deduplication
+                        event_id = data.get("id") or data.get("event_id")
+                        if event_id in processed_events:
+                            # Already processed, delete message and skip
+                            await sqs.delete_message(
+                                QueueUrl=QUEUE_URL,
+                                ReceiptHandle=msg["ReceiptHandle"]
+                            )
+                            continue
+                        processed_events.add(event_id)
+
+                        # Call the appropriate handler
+                        handler = EVENT_HANDLERS.get(event_type, handle_unknown)
+                        if handler == handle_unknown:
+                            await handler(event_type, data)
                         else:
-                            event_type = body.get("type")
-                            event_data = body.get("data", {})
-
-                        if event_type:
-                            await handle_event(event_type, event_data)
+                            await handler(data)
 
                         # Delete message after processing
                         await sqs.delete_message(
@@ -125,8 +101,14 @@ async def poll_sqs():
                         )
 
                     except Exception as e:
-                        print(f"[ERROR] Failed to process message: {e}")
+                        print(f"[ERROR] Failed to handle message: {e}")
 
             except Exception as e:
                 print(f"[ERROR] Polling failed: {e}")
                 await asyncio.sleep(5)
+
+# -------------------------------
+# Main entry point
+# -------------------------------
+if __name__ == "__main__":
+    asyncio.run(poll_sqs())
