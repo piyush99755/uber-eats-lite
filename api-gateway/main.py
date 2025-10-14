@@ -10,7 +10,7 @@ SERVICES = {
     "orders": "http://127.0.0.1:8002",
     "drivers": "http://127.0.0.1:8004",
     "notifications": "http://127.0.0.1:8003",
-    "payments": "http://127.0.0.1:8008",
+    "payments": "http://127.0.0.1:8008", #to implement in APi-gateway
 }
 
 @app.get("/")
