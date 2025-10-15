@@ -1,7 +1,30 @@
-FROM python:3.12-slim
+# Use official Python slim image
+FROM python:3.11-slim
+
+# Set working directory
 WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    libffi-dev \
+    build-essential \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Copy app code
 COPY . .
-EXPOSE 8003
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003"]
+
+# Expose port
+EXPOSE 8005
+
+# Start the FastAPI app
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8005", "--reload"]
+

@@ -1,16 +1,16 @@
-# main.py
 from fastapi import FastAPI, Request
 import httpx
+import os
 
 app = FastAPI(title="API Gateway")
 
-# Map each service name to its local URL
+# Read service URLs from environment variables
 SERVICES = {
     "users": "http://127.0.0.1:8001",
     "orders": "http://127.0.0.1:8002",
     "drivers": "http://127.0.0.1:8004",
     "notifications": "http://127.0.0.1:8003",
-    "payments": "http://127.0.0.1:8008", #to implement in APi-gateway
+    "payments": "http://127.0.0.1:8008",
 }
 
 @app.get("/")
@@ -46,4 +46,3 @@ async def proxy(service: str, path: str, request: Request):
             return {"error": f"{service} service is not reachable"}
         except Exception as e:
             return {"error": str(e)}
-

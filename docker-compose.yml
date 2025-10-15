@@ -1,0 +1,80 @@
+version: "3.9"
+
+services:
+  api-gateway:
+    build: ./api-gateway
+    container_name: api-gateway
+    ports:
+      - "8000:8000"
+    networks:
+      - uber-eats-lite-network
+
+  user-service:
+    build: ./user-service
+    container_name: user-service
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - SQS_ENDPOINT_URL=http://localstack:4566
+    networks:
+      - uber-eats-lite-network
+
+  driver-service:
+    build: ./driver-service
+    container_name: driver-service
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - SQS_ENDPOINT_URL=http://localstack:4566
+    networks:
+      - uber-eats-lite-network
+
+  order-service:
+    build: ./order-service
+    container_name: order-service
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - SQS_ENDPOINT_URL=http://localstack:4566
+    networks:
+      - uber-eats-lite-network
+
+  payment-service:
+    build: ./payment-service
+    container_name: payment-service
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - SQS_ENDPOINT_URL=http://localstack:4566
+    networks:
+      - uber-eats-lite-network
+
+  notification-service:
+    build: ./notification-service
+    container_name: notification-service
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - SQS_ENDPOINT_URL=http://localstack:4566
+    networks:
+      - uber-eats-lite-network
+
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sqs
+      - DEFAULT_REGION=us-east-1
+    networks:
+      - uber-eats-lite-network
+
+networks:
+  uber-eats-lite-network:
+    driver: bridge
