@@ -10,5 +10,5 @@ RUN python -m pip install --upgrade pip setuptools wheel \
 
 COPY . .
 
-EXPOSE 8004
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8004", "--reload"]
+EXPOSE 8008
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8008", "--reload"]
