@@ -1,48 +1,116 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
-import os
 
-app = FastAPI(title="API Gateway")
+# ---------------------------------------------------------
+# API Gateway for Uber Eats Lite
+# ---------------------------------------------------------
 
-# Read service URLs from environment variables
+app = FastAPI(
+    title="API Gateway",
+    redirect_slashes=False  #prevents FastAPI auto-redirect (307) that breaks CORS
+)
+
+# ---------------------------------------------------------
+#  CORS Configuration
+# ---------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",  # local frontend
+        "http://uber-eats-lite-alb-849444077.us-east-1.elb.amazonaws.com",  # ALB
+        "*"  # for testing; remove later in prod
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------
+# Service Routing Table
+# ---------------------------------------------------------
 SERVICES = {
-    "users": "http://127.0.0.1:8001",
-    "orders": "http://127.0.0.1:8002",
-    "drivers": "http://127.0.0.1:8004",
-    "notifications": "http://127.0.0.1:8003",
-    "payments": "http://127.0.0.1:8008",
+    "users": "http://user-service:8001",
+    "orders": "http://order-service:8002",
+    "drivers": "http://driver-service:8004",
+    "notifications": "http://notification-service:8003",
+    "payments": "http://payment-service:8008",
 }
 
+
+# ---------------------------------------------------------
+# Root Endpoint
+# ---------------------------------------------------------
 @app.get("/")
 def root():
-    return {"message": "Welcome to API Gateway", "available_routes": list(SERVICES.keys())}
+    return {
+        "message": "Welcome to the API Gateway",
+        "available_services": list(SERVICES.keys())
+    }
 
-@app.get("/health")
-def health():
-    return {"status": "api-gateway healthy"}
 
-# Generic proxy route — handles GET, POST, PUT, DELETE for all services
-@app.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+# ---------------------------------------------------------
+# Proxy Route — Forwards requests to internal services
+# ---------------------------------------------------------
+@app.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def proxy(service: str, path: str, request: Request):
+    #Handle browser CORS preflight directly
+    if request.method == "OPTIONS":
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+        return Response(status_code=200, headers=headers)
+
+    # Validate service name
     if service not in SERVICES:
-        return {"error": f"Unknown service '{service}'"}
+        return Response(
+            content=f"{{'error': 'Unknown service {service}'}}",
+            status_code=404,
+            media_type="application/json"
+        )
 
-    target_url = f"{SERVICES[service]}/{path}" if path else f"{SERVICES[service]}/{service}"
+    # Normalize trailing slash (avoid redirect)
+    path = path.rstrip("/")
 
-    method = request.method
-    headers = dict(request.headers)
-    body = await request.body()
+    # Construct internal target URL
+    target_url = f"{SERVICES[service]}/{path}" if path else SERVICES[service]
 
+    # Proxy the request to the internal service
     async with httpx.AsyncClient() as client:
         try:
             response = await client.request(
-                method,
-                target_url,
-                headers=headers,
-                content=body,
+                method=request.method,
+                url=target_url,
+                headers={k: v for k, v in request.headers.items() if k.lower() != "host"},
+                content=await request.body(),
             )
-            return response.json()
+
+            # Return downstream response + add CORS headers
+            headers = {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            }
+
+            return Response(
+                content=response.text,
+                status_code=response.status_code,
+                media_type=response.headers.get("content-type"),
+                headers=headers,
+            )
+
         except httpx.ConnectError:
-            return {"error": f"{service} service is not reachable"}
+            return Response(
+                content=f"{{'error': '{service} service is not reachable'}}",
+                status_code=503,
+                media_type="application/json"
+            )
+
         except Exception as e:
-            return {"error": str(e)}
+            return Response(
+                content=f"{{'error': 'Unexpected error: {str(e)}'}}",
+                status_code=500,
+                media_type="application/json"
+            )

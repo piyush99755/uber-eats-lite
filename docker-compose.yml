@@ -5,13 +5,21 @@ services:
     build: ./api-gateway
     container_name: api-gateway
     ports:
-      - "8000:8000"
+      - "8000:8000" # expose only this one to host
+    depends_on:
+      - user-service
+      - driver-service
+      - order-service
+      - payment-service
+      - notification-service
     networks:
       - uber-eats-lite-network
 
   user-service:
     build: ./user-service
     container_name: user-service
+    expose:
+      - "8001" # internal port (no host mapping)
     environment:
       - AWS_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=test
@@ -23,6 +31,8 @@ services:
   driver-service:
     build: ./driver-service
     container_name: driver-service
+    expose:
+      - "8004"
     environment:
       - AWS_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=test
@@ -34,6 +44,8 @@ services:
   order-service:
     build: ./order-service
     container_name: order-service
+    expose:
+      - "8002"
     environment:
       - AWS_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=test
@@ -45,6 +57,8 @@ services:
   payment-service:
     build: ./payment-service
     container_name: payment-service
+    expose:
+      - "8008"
     environment:
       - AWS_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=test
@@ -56,6 +70,8 @@ services:
   notification-service:
     build: ./notification-service
     container_name: notification-service
+    expose:
+      - "8003"
     environment:
       - AWS_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=test

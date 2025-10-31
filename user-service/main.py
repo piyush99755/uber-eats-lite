@@ -8,6 +8,22 @@ from events import publish_event
 
 app = FastAPI(title="User Service")
 
+from fastapi.middleware.cors import CORSMiddleware
+
+# Allow frontend and gateway to access this service
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",  # local frontend
+        "http://uber-eats-lite-alb-849444077.us-east-1.elb.amazonaws.com",  # ALB
+        "*"  # for testing; remove later in prod
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 
 # ------------------------
 # Startup & Shutdown
