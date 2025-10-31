@@ -8,11 +8,11 @@ import httpx
 
 app = FastAPI(
     title="API Gateway",
-    redirect_slashes=False  #prevents FastAPI auto-redirect (307) that breaks CORS
+    redirect_slashes=False  # Prevents FastAPI 307 redirects that break CORS preflight
 )
 
 # ---------------------------------------------------------
-#  CORS Configuration
+# CORS Configuration
 # ---------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
@@ -27,6 +27,18 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------
+# Global OPTIONS handler (handles all CORS preflights)
+# ---------------------------------------------------------
+@app.options("/{full_path:path}")
+async def preflight(full_path: str):
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+    }
+    return Response(status_code=200, headers=headers)
+
+# ---------------------------------------------------------
 # Service Routing Table
 # ---------------------------------------------------------
 SERVICES = {
@@ -36,7 +48,6 @@ SERVICES = {
     "notifications": "http://notification-service:8003",
     "payments": "http://payment-service:8008",
 }
-
 
 # ---------------------------------------------------------
 # Root Endpoint
@@ -48,36 +59,25 @@ def root():
         "available_services": list(SERVICES.keys())
     }
 
-
 # ---------------------------------------------------------
 # Proxy Route — Forwards requests to internal services
 # ---------------------------------------------------------
 @app.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def proxy(service: str, path: str, request: Request):
-    #Handle browser CORS preflight directly
-    if request.method == "OPTIONS":
-        headers = {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-        }
-        return Response(status_code=200, headers=headers)
+    # Normalize path to prevent redirect or mismatch
+    path = path.strip("/")
 
-    # Validate service name
+    # Validate service
     if service not in SERVICES:
         return Response(
-            content=f"{{'error': 'Unknown service {service}'}}",
+            content=f'{{"error": "Unknown service {service}"}}',
             status_code=404,
             media_type="application/json"
         )
 
-    # Normalize trailing slash (avoid redirect)
-    path = path.rstrip("/")
-
-    # Construct internal target URL
+    # Construct internal URL
     target_url = f"{SERVICES[service]}/{path}" if path else SERVICES[service]
 
-    # Proxy the request to the internal service
     async with httpx.AsyncClient() as client:
         try:
             response = await client.request(
@@ -87,7 +87,6 @@ async def proxy(service: str, path: str, request: Request):
                 content=await request.body(),
             )
 
-            # Return downstream response + add CORS headers
             headers = {
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -103,14 +102,14 @@ async def proxy(service: str, path: str, request: Request):
 
         except httpx.ConnectError:
             return Response(
-                content=f"{{'error': '{service} service is not reachable'}}",
+                content=f'{{"error": "{service} service is not reachable"}}',
                 status_code=503,
                 media_type="application/json"
             )
 
         except Exception as e:
             return Response(
-                content=f"{{'error': 'Unexpected error: {str(e)}'}}",
+                content=f'{{"error": "Unexpected error: {str(e)}"}}',
                 status_code=500,
                 media_type="application/json"
             )
