@@ -8,7 +8,7 @@ import logging
 # ---------------------------------------------------------
 app = FastAPI(
     title="API Gateway",
-    redirect_slashes=False  # Prevent 307 redirects that break CORS preflights
+    redirect_slashes=False  # Prevents redirect loops like 307
 )
 
 # ---------------------------------------------------------
@@ -23,7 +23,7 @@ logger = logging.getLogger("api-gateway")
 ALLOWED_ORIGINS = [
     "http://localhost:5173",  # Local frontend
     "http://uber-eats-lite-alb-849444077.us-east-1.elb.amazonaws.com",  # ALB
-    "*"  # For testing; remove or restrict later
+    "*"  # Keep this for testing; remove in production
 ]
 
 app.add_middleware(
@@ -33,20 +33,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ---------------------------------------------------------
-# Global OPTIONS handler — handles all CORS preflights
-# ---------------------------------------------------------
-@app.options("/{full_path:path}")
-async def preflight(full_path: str, request: Request):
-    origin = request.headers.get("origin", "*")
-    headers = {
-        "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Allow-Credentials": "true",
-    }
-    return Response(status_code=200, headers=headers)
 
 # ---------------------------------------------------------
 # Service Routing Table
@@ -81,20 +67,13 @@ def root():
 # ---------------------------------------------------------
 @app.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def proxy(service: str, path: str, request: Request):
-    # Normalize trailing slash
+    """
+    Generic route that proxies requests to the correct internal service.
+    Example: /users/health → user-service
+    """
+
+    # Normalize path
     path = path.rstrip("/")
-
-    origin = request.headers.get("origin", "*")
-    cors_headers = {
-        "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Allow-Credentials": "true",
-    }
-
-    # Handle preflight requests
-    if request.method == "OPTIONS":
-        return Response(status_code=200, headers=cors_headers)
 
     # Validate service
     if service not in SERVICES:
@@ -102,10 +81,9 @@ async def proxy(service: str, path: str, request: Request):
             content=f'{{"error": "Unknown service {service}"}}',
             status_code=404,
             media_type="application/json",
-            headers=cors_headers,
         )
 
-    # Remove duplicate prefix if present
+    # Remove duplicate prefix if present (like /users/users)
     if path.startswith(service + "/"):
         path = path[len(service) + 1:]
 
@@ -121,12 +99,10 @@ async def proxy(service: str, path: str, request: Request):
                 content=await request.body(),
             )
 
-        # Return proxied response with CORS headers
         return Response(
             content=response.text,
             status_code=response.status_code,
             media_type=response.headers.get("content-type"),
-            headers=cors_headers,
         )
 
     except httpx.ConnectError:
@@ -135,7 +111,6 @@ async def proxy(service: str, path: str, request: Request):
             content=f'{{"error": "{service} service is not reachable"}}',
             status_code=503,
             media_type="application/json",
-            headers=cors_headers,
         )
 
     except Exception as e:
@@ -144,5 +119,4 @@ async def proxy(service: str, path: str, request: Request):
             content=f'{{"error": "Unexpected error: {str(e)}"}}',
             status_code=500,
             media_type="application/json",
-            headers=cors_headers,
         )
