@@ -105,6 +105,10 @@ async def proxy(service: str, path: str, request: Request):
             headers=cors_headers,
         )
 
+    # Remove duplicate prefix if present
+    if path.startswith(service + "/"):
+        path = path[len(service) + 1:]
+
     target_url = f"{SERVICES[service]}/{path}" if path else SERVICES[service]
     logger.info(f"Proxying {request.method} → {target_url}")
 
