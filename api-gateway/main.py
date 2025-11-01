@@ -50,7 +50,7 @@ SERVICES = {
 # ---------------------------------------------------------
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "api-gateway"}
+    return {"status": "api-gateway healthy"}
 
 # ---------------------------------------------------------
 # Root Endpoint
@@ -63,7 +63,7 @@ def root():
     }
 
 # ---------------------------------------------------------
-# Global OPTIONS Handler (Preflight)
+# Global OPTIONS Handler (CORS Preflight)
 # ---------------------------------------------------------
 @app.options("/{full_path:path}")
 async def preflight(full_path: str, request: Request):
@@ -78,28 +78,32 @@ async def preflight(full_path: str, request: Request):
     return Response(status_code=200, headers=headers)
 
 # ---------------------------------------------------------
-# Proxy Route — Forwards requests to internal services
+# Helper: CORS header generator
 # ---------------------------------------------------------
-@app.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-async def proxy(service: str, path: str, request: Request):
-    """
-    Generic route that proxies requests to internal microservices.
-
-    Example:
-      /users/health  → http://user-service-uber.uber-eats-lite.local:8001/health
-      /orders/create → http://order-service-uber.uber-eats-lite.local:8002/create
-    """
-
-    # Dynamic CORS headers
+def make_cors_headers(request: Request):
     origin = request.headers.get("origin", "*")
-    cors_headers = {
+    return {
         "Access-Control-Allow-Origin": origin,
         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "*",
         "Access-Control-Allow-Credentials": "true",
     }
 
-    # Handle preflight immediately
+# ---------------------------------------------------------
+# Handle /<service> (no trailing path)
+# ---------------------------------------------------------
+@app.api_route("/{service}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+async def proxy_root_service(service: str, request: Request):
+    return await proxy(service, "", request)
+
+# ---------------------------------------------------------
+# Main Proxy Route — /<service>/<path>
+# ---------------------------------------------------------
+@app.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+async def proxy(service: str, path: str, request: Request):
+    cors_headers = make_cors_headers(request)
+
+    # Preflight check
     if request.method == "OPTIONS":
         logger.info(f"OPTIONS preflight → {service}/{path}")
         return Response(status_code=200, headers=cors_headers)
@@ -117,8 +121,6 @@ async def proxy(service: str, path: str, request: Request):
     # Normalize redundant prefixes
     if path.startswith(service + "/"):
         path = path[len(service) + 1:]
-    elif path == service:
-        path = ""
 
     target_url = f"{SERVICES[service]}/{path}" if path else SERVICES[service]
     logger.info(f"Proxying {request.method} → {target_url}")
@@ -137,7 +139,7 @@ async def proxy(service: str, path: str, request: Request):
             content=proxied_response.text,
             status_code=proxied_response.status_code,
             media_type=proxied_response.headers.get("content-type"),
-            headers={**cors_headers},
+            headers=cors_headers,
         )
 
     except httpx.ConnectError:
