@@ -4,15 +4,15 @@ import httpx
 import logging
 
 # ---------------------------------------------------------
-# API Gateway for Uber Eats Lite
+# Uber Eats Lite - API Gateway
 # ---------------------------------------------------------
 app = FastAPI(
-    title="API Gateway",
+    title="Uber Eats Lite API Gateway",
     redirect_slashes=False
 )
 
 # ---------------------------------------------------------
-# Logging setup
+# Logging Setup
 # ---------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api-gateway")
@@ -23,7 +23,7 @@ logger = logging.getLogger("api-gateway")
 ALLOWED_ORIGINS = [
     "http://localhost:5173",  # Local frontend
     "http://uber-eats-lite-alb-849444077.us-east-1.elb.amazonaws.com",  # ALB
-    "*"  # Keep * for testing; restrict in production
+    "*"  # Keep for testing only; restrict later
 ]
 
 app.add_middleware(
@@ -46,7 +46,7 @@ SERVICES = {
 }
 
 # ---------------------------------------------------------
-# Health Endpoint
+# Health Check Endpoint
 # ---------------------------------------------------------
 @app.get("/health")
 def health():
@@ -58,27 +58,12 @@ def health():
 @app.get("/")
 def root():
     return {
-        "message": "Welcome to the API Gateway",
+        "message": "Welcome to Uber Eats Lite API Gateway",
         "available_services": list(SERVICES.keys()),
     }
 
 # ---------------------------------------------------------
-# Global OPTIONS Handler (CORS Preflight)
-# ---------------------------------------------------------
-@app.options("/{full_path:path}")
-async def preflight(full_path: str, request: Request):
-    origin = request.headers.get("origin", "*")
-    headers = {
-        "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Allow-Credentials": "true",
-    }
-    logger.info(f"Preflight CORS check for {full_path}")
-    return Response(status_code=200, headers=headers)
-
-# ---------------------------------------------------------
-# Helper: CORS header generator
+# Helper: CORS Headers
 # ---------------------------------------------------------
 def make_cors_headers(request: Request):
     origin = request.headers.get("origin", "*")
@@ -90,25 +75,34 @@ def make_cors_headers(request: Request):
     }
 
 # ---------------------------------------------------------
-# Handle /<service> (no trailing path)
+# Global OPTIONS Handler (Preflight)
+# ---------------------------------------------------------
+@app.options("/{full_path:path}")
+async def preflight(full_path: str, request: Request):
+    headers = make_cors_headers(request)
+    logger.info(f"Preflight CORS check for {full_path}")
+    return Response(status_code=200, headers=headers)
+
+# ---------------------------------------------------------
+# Handle /<service> (root of each service)
 # ---------------------------------------------------------
 @app.api_route("/{service}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-async def proxy_root_service(service: str, request: Request):
-    return await proxy(service, "", request)
+async def proxy_root(request: Request, service: str):
+    return await proxy(request, service, "")
 
 # ---------------------------------------------------------
-# Main Proxy Route — /<service>/<path>
+# Main Proxy Route - /<service>/<path>
 # ---------------------------------------------------------
 @app.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-async def proxy(service: str, path: str, request: Request):
+async def proxy(request: Request, service: str, path: str = ""):
     cors_headers = make_cors_headers(request)
 
-    # Preflight check
+    # Handle preflight requests early
     if request.method == "OPTIONS":
         logger.info(f"OPTIONS preflight → {service}/{path}")
         return Response(status_code=200, headers=cors_headers)
 
-    # Validate service
+    # Validate service name
     if service not in SERVICES:
         logger.warning(f"Unknown service requested: {service}")
         return Response(
@@ -118,7 +112,7 @@ async def proxy(service: str, path: str, request: Request):
             headers=cors_headers,
         )
 
-    # Normalize redundant prefixes
+    # Normalize duplicate prefixes (e.g., /users/users)
     if path.startswith(service + "/"):
         path = path[len(service) + 1:]
 
@@ -126,7 +120,7 @@ async def proxy(service: str, path: str, request: Request):
     logger.info(f"Proxying {request.method} → {target_url}")
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             proxied_response = await client.request(
                 method=request.method,
                 url=target_url,
@@ -134,13 +128,17 @@ async def proxy(service: str, path: str, request: Request):
                 content=await request.body(),
             )
 
-        # Return proxied response with CORS headers
-        return Response(
+        # Build final response with CORS headers
+        response = Response(
             content=proxied_response.text,
             status_code=proxied_response.status_code,
             media_type=proxied_response.headers.get("content-type"),
-            headers=cors_headers,
         )
+
+        for k, v in cors_headers.items():
+            response.headers[k] = v
+
+        return response
 
     except httpx.ConnectError:
         logger.error(f"{service} unreachable at {target_url}")
