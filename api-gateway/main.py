@@ -48,6 +48,10 @@ SERVICES = {
     "payments": "http://payment-service-uber.uber-eats-lite.local:8008",
 }
 
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "api-gateway"}
+
 # ---------------------------------------------------------
 # Root Endpoint
 # ---------------------------------------------------------
