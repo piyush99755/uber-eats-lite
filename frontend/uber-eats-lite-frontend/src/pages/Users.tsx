@@ -17,14 +17,22 @@ export default function Users() {
   const [error, setError] = useState<string>("");
 
   useEffect(() => {
-    api.get<User[]>("/users")
-      .then(res => setUsers(res.data))
-      .catch(err => setError(err.message));
-  }, []);
+  api.get<User[]>("/users/users")
+    .then(res => {
+      console.log("Fetched users:", res.data);
+      setUsers(res.data);
+    })
+    .catch(err => {
+      console.error("Error fetching users:", err);
+      setError(err.message);
+    });
+}, []);
+
+  
 
   return (
     
-
+    
     <div className="text-center mt-10">
       <h1 className="text-3xl font-bold">👥 Users Page</h1>
       <p className="text-gray-600 mt-2">
