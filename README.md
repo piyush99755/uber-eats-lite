@@ -46,3 +46,26 @@ All services communicate asynchronously through **AWS SQS + EventBridge** (local
              │     AWS SQS +          │
              │   EventBridge (Local)  │
              └────────────────────────┘
+
+
+---
+
+## ⚙️ Tech Stack
+**Frontend:** React (Vite, Tailwind CSS)  
+**Backend:** FastAPI microservices (Users, Orders, Drivers, Payments, Notifications)  
+**Messaging:** AWS SQS + EventBridge (via LocalStack)  
+**Infra:** Docker, Docker Compose  
+**Database:** SQLite / PostgreSQL  
+**Cloud (previously):** AWS ECS, ECR, ALB, Target Groups, Security Groups
+
+> 🧭 *Originally deployed on AWS ECS with ECR, ALB, Target Groups, and Security Groups.  
+Later migrated to Docker Compose + LocalStack for cost optimization while retaining full event-driven flow.*
+
+---
+
+## 🚀 Run Locally
+
+```bash
+git clone https://github.com/<your-username>/uber-eats-lite.git
+cd uber-eats-lite
+docker-compose up --build
