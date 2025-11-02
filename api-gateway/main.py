@@ -38,11 +38,11 @@ app.add_middleware(
 # Service Routing Table
 # ---------------------------------------------------------
 SERVICES = {
-    "users": "http://user-service-uber.uber-eats-lite.local:8001",
-    "orders": "http://order-service-uber.uber-eats-lite.local:8002",
-    "drivers": "http://driver-service-uber.uber-eats-lite.local:8004",
-    "notifications": "http://notification-service-uber.uber-eats-lite.local:8003",
-    "payments": "http://payment-service-uber.uber-eats-lite.local:8008",
+    "users": "http://user-service:8001",
+    "orders": "http://order-service:8002",
+    "drivers": "http://driver-service:8004",
+    "notifications": "http://notification-service:8003",
+    "payments": "http://payment-service:8008",
 }
 
 # ---------------------------------------------------------

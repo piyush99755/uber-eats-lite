@@ -17,7 +17,7 @@ export default function Users() {
   const [error, setError] = useState<string>("");
 
   useEffect(() => {
-  api.get<User[]>("/users")
+  api.get<User[]>("/users/users")
     .then(res => {
       console.log("Fetched users:", res.data);
       setUsers(res.data);
