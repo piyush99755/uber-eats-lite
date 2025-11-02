@@ -66,6 +66,7 @@ Later migrated to Docker Compose + LocalStack for cost optimization while retain
 ## 🚀 Run Locally
 
 ```bash
-git clone https://github.com/<your-username>/uber-eats-lite.git
+git clone https://github.com/piyush99755/uber-eats-lite.git
 cd uber-eats-lite
 docker-compose up --build
+
