@@ -23,10 +23,15 @@ export default function Drivers() {
     license_number: "",
   });
 
+  // -------------------------
+  // Fetch Drivers
+  // -------------------------
   const fetchDrivers = async () => {
     try {
       const res = await api.get<Driver[]>("/drivers/drivers");
-      setDrivers(res.data);
+      // show newest first
+      const sorted = [...res.data].reverse();
+      setDrivers(sorted);
       setError("");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -38,6 +43,9 @@ export default function Drivers() {
     fetchDrivers();
   }, []);
 
+  // -------------------------
+  // Create New Driver
+  // -------------------------
   const handleCreateDriver = async () => {
     if (!form.name || !form.vehicle || !form.license_number) {
       alert("Please fill all fields");
@@ -46,8 +54,12 @@ export default function Drivers() {
 
     setLoading(true);
     try {
-      await api.post("/drivers/drivers", form);
-      await fetchDrivers();
+      const res = await api.post<Driver>("/drivers/drivers", form);
+
+      // Prepend new driver to top of list
+      setDrivers((prev) => [res.data, ...prev]);
+
+      // Reset modal and form
       setShowModal(false);
       setForm({ name: "", vehicle: "", license_number: "" });
     } catch (err: unknown) {
@@ -58,6 +70,9 @@ export default function Drivers() {
     }
   };
 
+  // -------------------------
+  // Render
+  // -------------------------
   return (
     <div className="p-6">
       <div className="flex justify-between items-center mb-6">
@@ -70,13 +85,20 @@ export default function Drivers() {
       <div className="grid gap-3">
         {drivers.length ? (
           drivers.map((driver) => (
-            <div key={driver.id} className="border rounded-lg p-4 bg-white shadow">
+            <div
+              key={driver.id}
+              className="border rounded-lg p-4 bg-white shadow"
+            >
               <p className="font-semibold">{driver.name}</p>
               <p className="text-gray-500 text-sm">{driver.vehicle}</p>
-              <p className="text-sm text-gray-400">License: {driver.license_number}</p>
+              <p className="text-sm text-gray-400">
+                License: {driver.license_number}
+              </p>
               <p
                 className={`text-sm font-medium mt-1 ${
-                  driver.status === "available" ? "text-green-600" : "text-yellow-500"
+                  driver.status === "available"
+                    ? "text-green-600"
+                    : "text-yellow-500"
                 }`}
               >
                 {driver.status}
@@ -89,7 +111,11 @@ export default function Drivers() {
       </div>
 
       {/* Modal */}
-      <Modal show={showModal} onClose={() => setShowModal(false)} title="Add New Driver">
+      <Modal
+        show={showModal}
+        onClose={() => setShowModal(false)}
+        title="Add New Driver"
+      >
         <input
           type="text"
           placeholder="Name"
@@ -108,7 +134,9 @@ export default function Drivers() {
           type="text"
           placeholder="License Number"
           value={form.license_number}
-          onChange={(e) => setForm({ ...form, license_number: e.target.value })}
+          onChange={(e) =>
+            setForm({ ...form, license_number: e.target.value })
+          }
           className="border p-2 w-full mb-4 rounded"
         />
         <Button onClick={handleCreateDriver} loading={loading} className="w-full">
