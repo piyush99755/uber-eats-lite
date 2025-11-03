@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Link, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useEffect, useState } from "react";
 import Home from "./pages/Home";
 import Orders from "./pages/Orders";
@@ -6,45 +6,15 @@ import Users from "./pages/Users";
 import Drivers from "./pages/Drivers";
 import Notifications from "./pages/Notifications";
 import Payments from "./pages/Payments";
-import Events from "./pages/Events"; // create this page next
+import Events from "./pages/Events";
 import api from "./api/api";
+import Sidebar from "./components/Sidebar";
 
+// --- Health Panel ---
 interface ServiceHealth {
   name: string;
   endpoint: string;
   status: "healthy" | "down";
-}
-
-function Sidebar() {
-  const location = useLocation();
-  const links = [
-    { path: "/", label: "🏠 Home" },
-    { path: "/users", label: "👥 Users" },
-    { path: "/orders", label: "🧾 Orders" },
-    { path: "/drivers", label: "🚗 Drivers" },
-    { path: "/payments", label: "💳 Payments" },
-    { path: "/notifications", label: "🔔 Notifications" },
-    { path: "/events", label: "📊 Events" },
-  ];
-
-  return (
-    <div className="w-56 bg-gray-900 text-white min-h-screen p-5 flex flex-col gap-4">
-      <h1 className="text-xl font-bold mb-4 text-green-400">Uber Eats Lite</h1>
-      {links.map(({ path, label }) => (
-        <Link
-          key={path}
-          to={path}
-          className={`px-3 py-2 rounded-lg transition ${
-            location.pathname === path
-              ? "bg-green-600 text-white"
-              : "hover:bg-gray-700"
-          }`}
-        >
-          {label}
-        </Link>
-      ))}
-    </div>
-  );
 }
 
 function HealthPanel() {
@@ -76,7 +46,7 @@ function HealthPanel() {
     };
 
     checkHealth();
-    const interval = setInterval(checkHealth, 10000); // refresh every 10s
+    const interval = setInterval(checkHealth, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -103,11 +73,27 @@ function HealthPanel() {
   );
 }
 
+// --- App Layout with Responsive Sidebar ---
 function AppLayout() {
+  const [open, setOpen] = useState(false);
+
   return (
-    <div className="flex bg-gray-50">
-      <Sidebar />
-      <main className="flex-1 p-6">
+    <div className="flex flex-col md:flex-row min-h-screen bg-gray-50">
+      {/* Mobile Header */}
+      <div className="md:hidden flex justify-between items-center p-4 bg-gray-900 text-white">
+        <h1 className="text-lg font-bold">Uber Eats Lite</h1>
+        <button onClick={() => setOpen(!open)} className="text-xl">
+          ☰
+        </button>
+      </div>
+
+      {/* Sidebar */}
+      <div className={`${open ? "block" : "hidden"} md:block`}>
+        <Sidebar onNavigate={() => setOpen(false)} />
+      </div>
+
+      {/* Main Content */}
+      <main className="flex-1 p-6 overflow-auto">
         <HealthPanel />
         <Routes>
           <Route path="/" element={<Home />} />
@@ -123,6 +109,7 @@ function AppLayout() {
   );
 }
 
+// --- Root App ---
 export default function App() {
   return (
     <BrowserRouter>
