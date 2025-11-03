@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import Home from "./pages/Home";
 import Orders from "./pages/Orders";
 import Users from "./pages/Users";
@@ -73,27 +74,45 @@ function HealthPanel() {
   );
 }
 
-// --- App Layout with Responsive Sidebar ---
+// --- App Layout with Animated Sidebar ---
 function AppLayout() {
   const [open, setOpen] = useState(false);
 
   return (
-    <div className="flex flex-col md:flex-row min-h-screen bg-gray-50">
+    <div className="flex flex-col md:flex-row min-h-screen bg-gray-50 relative overflow-hidden">
       {/* Mobile Header */}
       <div className="md:hidden flex justify-between items-center p-4 bg-gray-900 text-white">
         <h1 className="text-lg font-bold">Uber Eats Lite</h1>
-        <button onClick={() => setOpen(!open)} className="text-xl">
+        <button
+          onClick={() => setOpen(!open)}
+          className="text-2xl focus:outline-none"
+        >
           ☰
         </button>
       </div>
 
-      {/* Sidebar */}
-      <div className={`${open ? "block" : "hidden"} md:block`}>
-        <Sidebar onNavigate={() => setOpen(false)} />
+      {/* Animated Sidebar for mobile */}
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ x: "-100%" }}
+            animate={{ x: 0 }}
+            exit={{ x: "-100%" }}
+            transition={{ type: "tween", duration: 0.3 }}
+            className="fixed inset-y-0 left-0 w-64 bg-gray-900 z-50 shadow-lg md:hidden"
+          >
+            <Sidebar onNavigate={() => setOpen(false)} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Desktop Sidebar (always visible) */}
+      <div className="hidden md:block">
+        <Sidebar />
       </div>
 
       {/* Main Content */}
-      <main className="flex-1 p-6 overflow-auto">
+      <main className="flex-1 p-6 overflow-auto z-10">
         <HealthPanel />
         <Routes>
           <Route path="/" element={<Home />} />
@@ -105,6 +124,14 @@ function AppLayout() {
           <Route path="/events" element={<Events />} />
         </Routes>
       </main>
+
+      {/* Mobile overlay background */}
+      {open && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-40 md:hidden"
+          onClick={() => setOpen(false)}
+        />
+      )}
     </div>
   );
 }
