@@ -115,6 +115,16 @@ async def proxy(request: Request, service: str, path: str = ""):
     # Normalize duplicate prefixes (e.g., /users/users)
     if path.startswith(service + "/"):
         path = path[len(service) + 1:]
+        
+    # Handle root paths (e.g., /users should forward to /users)
+    if not path:
+        if service == "users":
+            path = "users"
+        elif service == "orders":
+            path = "orders"
+        elif service == "drivers":
+            path = "drivers"
+
 
     target_url = f"{SERVICES[service]}/{path}" if path else SERVICES[service]
     logger.info(f"Proxying {request.method} → {target_url}")

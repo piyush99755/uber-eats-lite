@@ -18,7 +18,7 @@ export default function Users() {
 
   const fetchUsers = async () => {
     try {
-      const res = await api.get<User[]>("/users/users");
+      const res = await api.get<User[]>("/users");
       setUsers(res.data);
       setError("");
     } catch (err: unknown) {
@@ -39,7 +39,7 @@ export default function Users() {
 
     setLoading(true);
     try {
-      await api.post("/users/users", form);
+      await api.post("/users", form);
       await fetchUsers();
       setShowModal(false);
       setForm({ name: "", email: "" });

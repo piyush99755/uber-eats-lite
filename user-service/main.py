@@ -49,6 +49,9 @@ def health():
 # ------------------------
 # Create User
 # ------------------------
+# ------------------------
+# Create User
+# ------------------------
 @app.post("/users", response_model=User)
 async def create_user(user: UserCreate):
     """
@@ -63,12 +66,15 @@ async def create_user(user: UserCreate):
     )
     await database.execute(query)
 
-    # Publish event to EventBridge/SQS
-    await publish_event("user.created", {
-        "id": user_id,
-        "name": user.name,
-        "email": user.email
-    })
+    # Try to publish event but don't crash if it fails
+    try:
+        await publish_event("user.created", {
+            "id": user_id,
+            "name": user.name,
+            "email": user.email
+        })
+    except Exception as e:
+        print(f"[Warning] Failed to publish event: {e}")
 
     return User(id=user_id, **user.dict())
 
