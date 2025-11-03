@@ -16,24 +16,14 @@ export default function Drivers() {
   const [error, setError] = useState("");
   const [showModal, setShowModal] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [form, setForm] = useState({ name: "", vehicle: "", license_number: "" });
 
-  const [form, setForm] = useState({
-    name: "",
-    vehicle: "",
-    license_number: "",
-  });
-
-  // -------------------------
-  // Fetch Drivers
-  // -------------------------
   const fetchDrivers = async () => {
     try {
       const res = await api.get<Driver[]>("/drivers/drivers");
-      // show newest first
-      const sorted = [...res.data].reverse();
-      setDrivers(sorted);
+      setDrivers([...res.data].reverse());
       setError("");
-    } catch (err: unknown) {
+    } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
     }
@@ -43,9 +33,6 @@ export default function Drivers() {
     fetchDrivers();
   }, []);
 
-  // -------------------------
-  // Create New Driver
-  // -------------------------
   const handleCreateDriver = async () => {
     if (!form.name || !form.vehicle || !form.license_number) {
       alert("Please fill all fields");
@@ -55,24 +42,27 @@ export default function Drivers() {
     setLoading(true);
     try {
       const res = await api.post<Driver>("/drivers/drivers", form);
-
-      // Prepend new driver to top of list
       setDrivers((prev) => [res.data, ...prev]);
-
-      // Reset modal and form
       setShowModal(false);
       setForm({ name: "", vehicle: "", license_number: "" });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      alert("Failed to create driver: " + message);
+    } catch (err) {
+      alert("Failed to create driver");
     } finally {
       setLoading(false);
     }
   };
 
-  // -------------------------
-  // Render
-  // -------------------------
+  const handleDeleteDriver = async (id: string) => {
+    if (!confirm("Delete this driver?")) return;
+    try {
+      await api.delete(`/drivers/drivers/${id}`);
+      setDrivers((prev) => prev.filter((d) => d.id !== id));
+    } catch (err) {
+      console.error(err);
+      alert("Failed to delete driver");
+    }
+  };
+
   return (
     <div className="p-6">
       <div className="flex justify-between items-center mb-6">
@@ -85,10 +75,7 @@ export default function Drivers() {
       <div className="grid gap-3">
         {drivers.length ? (
           drivers.map((driver) => (
-            <div
-              key={driver.id}
-              className="border rounded-lg p-4 bg-white shadow"
-            >
+            <div key={driver.id} className="border rounded-lg p-4 bg-white shadow">
               <p className="font-semibold">{driver.name}</p>
               <p className="text-gray-500 text-sm">{driver.vehicle}</p>
               <p className="text-sm text-gray-400">
@@ -103,6 +90,12 @@ export default function Drivers() {
               >
                 {driver.status}
               </p>
+              <Button
+                onClick={() => handleDeleteDriver(driver.id)}
+                className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 mt-3 rounded"
+              >
+                🗑 Delete
+              </Button>
             </div>
           ))
         ) : (
@@ -110,12 +103,7 @@ export default function Drivers() {
         )}
       </div>
 
-      {/* Modal */}
-      <Modal
-        show={showModal}
-        onClose={() => setShowModal(false)}
-        title="Add New Driver"
-      >
+      <Modal show={showModal} onClose={() => setShowModal(false)} title="Add New Driver">
         <input
           type="text"
           placeholder="Name"
@@ -134,9 +122,7 @@ export default function Drivers() {
           type="text"
           placeholder="License Number"
           value={form.license_number}
-          onChange={(e) =>
-            setForm({ ...form, license_number: e.target.value })
-          }
+          onChange={(e) => setForm({ ...form, license_number: e.target.value })}
           className="border p-2 w-full mb-4 rounded"
         />
         <Button onClick={handleCreateDriver} loading={loading} className="w-full">

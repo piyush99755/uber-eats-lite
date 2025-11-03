@@ -27,7 +27,7 @@ async def startup():
 async def shutdown():
     await database.disconnect()
 
-@app.get("/health")
+@app.get("/payments/health")
 def health():
     if last_poll_success:
         return {"status": "payment-service healthy"}

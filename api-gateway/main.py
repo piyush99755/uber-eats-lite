@@ -97,14 +97,13 @@ async def proxy_root(request: Request, service: str):
 async def proxy(request: Request, service: str, path: str = ""):
     cors_headers = make_cors_headers(request)
 
-    # Handle preflight requests early
+    # Handle preflight
     if request.method == "OPTIONS":
         logger.info(f"OPTIONS preflight → {service}/{path}")
         return Response(status_code=200, headers=cors_headers)
 
-    # Validate service name
+    # Validate service
     if service not in SERVICES:
-        logger.warning(f"Unknown service requested: {service}")
         return Response(
             content=f'{{"error": "Unknown service {service}"}}',
             status_code=404,
@@ -112,21 +111,13 @@ async def proxy(request: Request, service: str, path: str = ""):
             headers=cors_headers,
         )
 
-    # Normalize duplicate prefixes (e.g., /users/users)
-    if path.startswith(service + "/"):
-        path = path[len(service) + 1:]
-        
-    # Handle root paths (e.g., /users should forward to /users)
+    # --- FIX: always include service prefix once ---
     if not path:
-        if service == "users":
-            path = "users"
-        elif service == "orders":
-            path = "orders"
-        elif service == "drivers":
-            path = "drivers"
+        path = service
+    elif not path.startswith(service):
+        path = f"{service}/{path}"
 
-
-    target_url = f"{SERVICES[service]}/{path}" if path else SERVICES[service]
+    target_url = f"{SERVICES[service]}/{path}"
     logger.info(f"Proxying {request.method} → {target_url}")
 
     try:
@@ -138,7 +129,6 @@ async def proxy(request: Request, service: str, path: str = ""):
                 content=await request.body(),
             )
 
-        # Build final response with CORS headers
         response = Response(
             content=proxied_response.text,
             status_code=proxied_response.status_code,

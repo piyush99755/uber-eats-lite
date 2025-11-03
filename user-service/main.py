@@ -41,7 +41,7 @@ async def shutdown():
 # ------------------------
 # Health Check
 # ------------------------
-@app.get("/health")
+@app.get("/users/health")
 def health():
     return {"status": "ok", "service": "user-service"}
 
@@ -105,3 +105,17 @@ async def get_user(user_id: str):
     if not user_record:
         raise HTTPException(status_code=404, detail="User not found")
     return User(**dict(user_record))
+
+# DELETE USER
+@app.delete("/users/{user_id}", tags=["Users"])
+async def delete_user(user_id: str):
+    query = users.select().where(users.c.id == user_id)
+    existing_user = await database.fetch_one(query)
+    if not existing_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    delete_query = users.delete().where(users.c.id == user_id)
+    await database.execute(delete_query)
+
+    await publish_event("user.deleted", {"id": user_id})
+    return {"message": f"User {user_id} deleted successfully"}

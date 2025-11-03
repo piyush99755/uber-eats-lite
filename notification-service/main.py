@@ -67,6 +67,6 @@ async def list_notifications():
     return [Notification(**dict(r)) for r in rows]
 
 
-@app.get("/health")
+@app.get("/notifications/health")
 async def health():
     return {"status": "ok", "service": "notification-service"}

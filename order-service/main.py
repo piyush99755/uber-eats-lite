@@ -31,7 +31,7 @@ async def shutdown():
 # ------------------------
 # Health
 # ------------------------
-@app.get("/health", tags=["Health"])
+@app.get("/orders/health", tags=["Health"])
 async def health_check():
     return {"status": "ok", "service": "order-service"}
 
@@ -141,3 +141,17 @@ async def get_events(limit: int = 50):
     except Exception as e:
         print("ERROR in /events:", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+# DELETE ORDER
+@app.delete("/orders/{order_id}", tags=["Orders"])
+async def delete_order(order_id: str):
+    query = orders.select().where(orders.c.id == order_id)
+    existing_order = await database.fetch_one(query)
+    if not existing_order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    delete_query = orders.delete().where(orders.c.id == order_id)
+    await database.execute(delete_query)
+
+    await publish_event("order.deleted", {"id": order_id})
+    return {"message": f"Order {order_id} deleted successfully"}

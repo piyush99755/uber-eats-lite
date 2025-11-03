@@ -6,6 +6,9 @@ uvicorn==0.37.0
 sqlalchemy==2.0.24
 databases==0.9.0
 aiosqlite==0.21.0
+asyncpg
+psycopg2-binary
+
 
 # AWS (async)
 boto3

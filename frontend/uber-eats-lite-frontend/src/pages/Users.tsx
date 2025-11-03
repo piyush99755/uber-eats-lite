@@ -13,15 +13,15 @@ export default function Users() {
   const [users, setUsers] = useState<User[]>([]);
   const [error, setError] = useState("");
   const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({ name: "", email: "" });
   const [loading, setLoading] = useState(false);
+  const [form, setForm] = useState({ name: "", email: "" });
 
   const fetchUsers = async () => {
     try {
       const res = await api.get<User[]>("/users");
-      setUsers(res.data);
+      setUsers([...res.data].reverse());
       setError("");
-    } catch (err: unknown) {
+    } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
     }
@@ -39,15 +39,24 @@ export default function Users() {
 
     setLoading(true);
     try {
-      await api.post("/users", form);
-      await fetchUsers();
+      const res = await api.post<User>("/users", form);
+      setUsers((prev) => [res.data, ...prev]);
       setShowModal(false);
       setForm({ name: "", email: "" });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      alert("Failed to create user: " + message);
+    } catch (_err) {
+      alert("Failed to create user");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDeleteUser = async (id: string) => {
+    if (!confirm("Delete this user?")) return;
+    try {
+      await api.delete(`/users/${id}`);
+      setUsers((prev) => prev.filter((u) => u.id !== id));
+    } catch (_err) {
+      alert("Failed to delete user");
     }
   };
 
@@ -66,6 +75,12 @@ export default function Users() {
             <div key={user.id} className="border rounded-lg p-4 bg-white shadow">
               <p className="font-semibold">{user.name}</p>
               <p className="text-gray-500 text-sm">{user.email}</p>
+              <Button
+                onClick={() => handleDeleteUser(user.id)}
+                className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 mt-3 rounded"
+              >
+                🗑 Delete
+              </Button>
             </div>
           ))
         ) : (
@@ -73,8 +88,7 @@ export default function Users() {
         )}
       </div>
 
-      {/* Modal for creating user */}
-      <Modal show={showModal} onClose={() => setShowModal(false)} title="Create New User">
+      <Modal show={showModal} onClose={() => setShowModal(false)} title="Add New User">
         <input
           type="text"
           placeholder="Full Name"

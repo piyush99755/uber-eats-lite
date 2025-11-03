@@ -20,3 +20,5 @@ typing-inspection==0.4.2
 boto3
 aioboto3
 botocore
+asyncpg
+psycopg2-binary

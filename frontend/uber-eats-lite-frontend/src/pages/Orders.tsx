@@ -11,6 +11,7 @@ interface Order {
   status: string;
 }
 
+// TEMP MENU — will be replaced by dynamic API later
 const MENU_ITEMS = [
   { name: "Burger", price: 8 },
   { name: "Fries", price: 4 },
@@ -33,9 +34,7 @@ export default function Orders() {
   const fetchOrders = async () => {
     try {
       const res = await api.get<Order[]>("/orders/orders");
-      // Reverse for newest-first
-      const sorted = [...res.data].reverse();
-      setOrders(sorted);
+      setOrders([...res.data].reverse()); // newest-first
       setError("");
     } catch (e) {
       const message = e instanceof Error ? e.message : "Failed to fetch orders";
@@ -49,20 +48,6 @@ export default function Orders() {
   }, []);
 
   // --------------------------
-  // Handle menu toggle
-  // --------------------------
-  const toggleItem = (itemName: string) => {
-    setSelectedItems((prev) =>
-      prev.includes(itemName)
-        ? prev.filter((i) => i !== itemName)
-        : [...prev, itemName]
-    );
-  };
-
-  const total = MENU_ITEMS.filter((i) => selectedItems.includes(i.name))
-    .reduce((sum, i) => sum + i.price, 0);
-
-  // --------------------------
   // Create new order
   // --------------------------
   const handleCreateOrder = async () => {
@@ -73,16 +58,16 @@ export default function Orders() {
 
     setLoading(true);
     try {
+      const total = MENU_ITEMS.filter((i) => selectedItems.includes(i.name))
+        .reduce((sum, i) => sum + i.price, 0);
+
       const res = await api.post<Order>("/orders/orders", {
         user_id: userId,
         items: selectedItems,
         total,
       });
 
-      // Add new order to top
       setOrders((prev) => [res.data, ...prev]);
-
-      // Reset form
       setShowModal(false);
       setUserId("");
       setSelectedItems([]);
@@ -95,7 +80,21 @@ export default function Orders() {
   };
 
   // --------------------------
-  // Render UI
+  // Delete order
+  // --------------------------
+  const handleDeleteOrder = async (id: string) => {
+    if (!confirm("Are you sure you want to delete this order?")) return;
+    try {
+      await api.delete(`/orders/orders/${id}`);
+      setOrders((prev) => prev.filter((o) => o.id !== id));
+    } catch (err) {
+      console.error(err);
+      alert("Failed to delete order");
+    }
+  };
+
+  // --------------------------
+  // Render
   // --------------------------
   return (
     <div className="p-6">
@@ -109,28 +108,24 @@ export default function Orders() {
       <div className="grid gap-3">
         {orders.length ? (
           orders.map((order) => {
-            const itemList =
-              typeof order.items === "string"
-                ? (() => {
-                    try {
-                      const parsed = JSON.parse(order.items);
-                      return Array.isArray(parsed) ? parsed : [order.items];
-                    } catch {
-                      return [order.items];
-                    }
-                  })()
-                : order.items;
+            const items = Array.isArray(order.items)
+              ? order.items
+              : (() => {
+                  try {
+                    const parsed = JSON.parse(order.items);
+                    return Array.isArray(parsed) ? parsed : [order.items];
+                  } catch {
+                    return [order.items];
+                  }
+                })();
 
             return (
-              <div
-                key={order.id}
-                className="border rounded-lg p-4 bg-white shadow"
-              >
+              <div key={order.id} className="border rounded-lg p-4 bg-white shadow">
                 <p>
                   <strong>User:</strong> {order.user_id}
                 </p>
                 <p>
-                  <strong>Items:</strong> {itemList.join(", ")}
+                  <strong>Items:</strong> {items.join(", ")}
                 </p>
                 <p>
                   <strong>Total:</strong> ${order.total.toFixed(2)}
@@ -147,6 +142,12 @@ export default function Orders() {
                     {order.status}
                   </span>
                 </p>
+                <Button
+                  onClick={() => handleDeleteOrder(order.id)}
+                  className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 mt-3 rounded"
+                >
+                  🗑 Delete
+                </Button>
               </div>
             );
           })
@@ -156,11 +157,7 @@ export default function Orders() {
       </div>
 
       {/* Modal */}
-      <Modal
-        show={showModal}
-        onClose={() => setShowModal(false)}
-        title="Create New Order"
-      >
+      <Modal show={showModal} onClose={() => setShowModal(false)} title="Create New Order">
         <input
           type="text"
           placeholder="User ID"
@@ -173,7 +170,13 @@ export default function Orders() {
           {MENU_ITEMS.map((item) => (
             <button
               key={item.name}
-              onClick={() => toggleItem(item.name)}
+              onClick={() =>
+                setSelectedItems((prev) =>
+                  prev.includes(item.name)
+                    ? prev.filter((i) => i !== item.name)
+                    : [...prev, item.name]
+                )
+              }
               className={`border rounded p-2 text-sm ${
                 selectedItems.includes(item.name)
                   ? "bg-green-500 text-white"
@@ -185,13 +188,7 @@ export default function Orders() {
           ))}
         </div>
 
-        <p className="mb-3 font-semibold">Total: ${total.toFixed(2)}</p>
-
-        <Button
-          onClick={handleCreateOrder}
-          loading={loading}
-          className="w-full"
-        >
+        <Button onClick={handleCreateOrder} loading={loading} className="w-full">
           Create Order
         </Button>
       </Modal>

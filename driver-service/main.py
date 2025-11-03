@@ -57,6 +57,21 @@ async def create_driver(driver: DriverCreate):
 
     return Driver(id=driver_id, status="available", **driver.dict())
 
-@app.get("/health")
+@app.get("/drivers/health")
 async def health():
     return {"status": "driver-service healthy"}
+
+
+# DELETE DRIVER
+@app.delete("/drivers/{driver_id}", tags=["Drivers"])
+async def delete_driver(driver_id: str):
+    query = drivers.select().where(drivers.c.id == driver_id)
+    existing_driver = await database.fetch_one(query)
+    if not existing_driver:
+        raise HTTPException(status_code=404, detail="Driver not found")
+
+    delete_query = drivers.delete().where(drivers.c.id == driver_id)
+    await database.execute(delete_query)
+
+    await publish_event("driver.deleted", {"id": driver_id})
+    return {"message": f"Driver {driver_id} deleted successfully"}

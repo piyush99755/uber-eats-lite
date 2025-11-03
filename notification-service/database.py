@@ -1,16 +1,19 @@
+# database.py
 import os
 from databases import Database
 from sqlalchemy import create_engine, MetaData
 
-# --- Absolute path to database file to avoid path issues on Windows ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(BASE_DIR, "database.db")
-DATABASE_URL = f"sqlite:///{DB_FILE}"
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db"
+)
 
-# --- SQLAlchemy engine and metadata ---
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# async database client
+database = Database(DATABASE_URL)
+
+# SQLAlchemy sync engine for metadata.create_all()
+SYNC_DATABASE_URL = DATABASE_URL.replace("+asyncpg", "")
+engine = create_engine(SYNC_DATABASE_URL)
 metadata = MetaData()
 
-# --- Databases connection ---
-database = Database(DATABASE_URL)
 
