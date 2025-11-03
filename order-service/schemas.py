@@ -1,13 +1,11 @@
+# schemas.py
 from pydantic import BaseModel
-from typing import Any
+from typing import List, Any
 from datetime import datetime
 
-# ------------------------
-# Order Schemas
-# ------------------------
 class OrderCreate(BaseModel):
     user_id: str
-    items: str
+    items: List[str]   # ✅ list instead of string
     total: float
 
 class Order(OrderCreate):
@@ -17,14 +15,9 @@ class Order(OrderCreate):
 class AssignDriver(BaseModel):
     driver_id: str
 
-# ------------------------
-# Event Log Schema
-# ------------------------
 class EventLog(BaseModel):
     id: str
     event_type: str
     payload: Any
     source: str
     created_at: datetime
-
-

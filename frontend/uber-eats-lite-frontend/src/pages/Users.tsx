@@ -73,7 +73,7 @@ export default function Users() {
         )}
       </div>
 
-      {/* ✅ Modal for creating user */}
+      {/* Modal for creating user */}
       <Modal show={showModal} onClose={() => setShowModal(false)} title="Create New User">
         <input
           type="text"

@@ -6,31 +6,35 @@ import { Modal } from "../components/Modal";
 interface Order {
   id: string;
   user_id: string;
-  items: string;
+  items: string | string[]; // accept both types
   total: number;
   status: string;
 }
+
+const MENU_ITEMS = [
+  { name: "Burger", price: 8 },
+  { name: "Fries", price: 4 },
+  { name: "Coke", price: 3 },
+  { name: "Pizza", price: 12 },
+  { name: "Salad", price: 6 },
+];
 
 export default function Orders() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [error, setError] = useState("");
   const [showModal, setShowModal] = useState(false);
+  const [selectedItems, setSelectedItems] = useState<string[]>([]);
+  const [userId, setUserId] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const [form, setForm] = useState({
-    user_id: "",
-    items: "",
-    total: "",
-  });
-
+  // ✅ Fetch orders from API
   const fetchOrders = async () => {
     try {
       const res = await api.get<Order[]>("/orders/orders");
       setOrders(res.data);
-      setError("");
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(message);
+    } catch (e) {
+      console.error(e);
+      setError(e instanceof Error ? e.message : "Failed to fetch orders");
     }
   };
 
@@ -38,25 +42,40 @@ export default function Orders() {
     fetchOrders();
   }, []);
 
+  // Handle menu selection
+  const toggleItem = (itemName: string) => {
+    setSelectedItems((prev) =>
+      prev.includes(itemName)
+        ? prev.filter((i) => i !== itemName)
+        : [...prev, itemName]
+    );
+  };
+
+  const total = MENU_ITEMS.filter((i) => selectedItems.includes(i.name))
+    .reduce((sum, i) => sum + i.price, 0);
+
+  // Create new order
   const handleCreateOrder = async () => {
-    if (!form.user_id || !form.items || !form.total) {
-      alert("Please fill all fields");
+    if (!userId || selectedItems.length === 0) {
+      alert("Please provide user ID and select at least one item");
       return;
     }
 
     setLoading(true);
     try {
       await api.post("/orders/orders", {
-        user_id: form.user_id,
-        items: form.items,
-        total: parseFloat(form.total),
+        user_id: userId,
+        items: selectedItems, // send as string
+        total,
       });
-      await fetchOrders();
+
+      await fetchOrders(); // refresh orders immediately
       setShowModal(false);
-      setForm({ user_id: "", items: "", total: "" });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      alert("Failed to create order: " + message);
+      setUserId("");
+      setSelectedItems([]);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to create order");
     } finally {
       setLoading(false);
     }
@@ -69,46 +88,94 @@ export default function Orders() {
         <Button onClick={() => setShowModal(true)}>➕ Create Order</Button>
       </div>
 
-      {error && <p className="text-red-500 mb-4">Error: {error}</p>}
+      {error && <p className="text-red-500">Error: {error}</p>}
 
       <div className="grid gap-3">
         {orders.length ? (
-          orders.map((order) => (
-            <div key={order.id} className="border rounded-lg p-4 bg-white shadow">
-              <p><strong>Status:</strong> {order.status}</p>
-              <p><strong>Total:</strong> ${order.total}</p>
-              <p className="text-sm text-gray-500"><strong>User ID:</strong> {order.user_id}</p>
-            </div>
-          ))
+          orders.map((order) => {
+            const itemList =
+              typeof order.items === "string"
+                ? (() => {
+                    try {
+                      const parsed = JSON.parse(order.items);
+                      return Array.isArray(parsed) ? parsed : [order.items];
+                    } catch {
+                      return [order.items];
+                    }
+                  })()
+                : order.items;
+
+            return (
+              <div
+                key={order.id}
+                className="border rounded-lg p-4 bg-white shadow"
+              >
+                <p>
+                  <strong>User:</strong> {order.user_id}
+                </p>
+                <p>
+                  <strong>Items:</strong> {itemList.join(", ")}
+                </p>
+                <p>
+                  <strong>Total:</strong> ${order.total.toFixed(2)}
+                </p>
+                <p>
+                  <strong>Status:</strong>{" "}
+                  <span
+                    className={`font-semibold ${
+                      order.status === "pending"
+                        ? "text-yellow-600"
+                        : "text-green-600"
+                    }`}
+                  >
+                    {order.status}
+                  </span>
+                </p>
+              </div>
+            );
+          })
         ) : (
           <p>No orders found</p>
         )}
       </div>
 
       {/* Modal */}
-      <Modal show={showModal} onClose={() => setShowModal(false)} title="Create New Order">
+      <Modal
+        show={showModal}
+        onClose={() => setShowModal(false)}
+        title="Create New Order"
+      >
         <input
           type="text"
           placeholder="User ID"
-          value={form.user_id}
-          onChange={(e) => setForm({ ...form, user_id: e.target.value })}
-          className="border p-2 w-full mb-3 rounded"
-        />
-        <input
-          type="text"
-          placeholder="Items (comma separated)"
-          value={form.items}
-          onChange={(e) => setForm({ ...form, items: e.target.value })}
-          className="border p-2 w-full mb-3 rounded"
-        />
-        <input
-          type="number"
-          placeholder="Total"
-          value={form.total}
-          onChange={(e) => setForm({ ...form, total: e.target.value })}
+          value={userId}
+          onChange={(e) => setUserId(e.target.value)}
           className="border p-2 w-full mb-4 rounded"
         />
-        <Button onClick={handleCreateOrder} loading={loading} className="w-full">
+
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          {MENU_ITEMS.map((item) => (
+            <button
+              key={item.name}
+              onClick={() => toggleItem(item.name)}
+              className={`border rounded p-2 text-sm ${
+                selectedItems.includes(item.name)
+                  ? "bg-green-500 text-white"
+                  : "bg-gray-100"
+              }`}
+            >
+              {item.name} – ${item.price}
+            </button>
+          ))}
+        </div>
+
+        <p className="mb-3 font-semibold">Total: ${total.toFixed(2)}</p>
+
+        <Button
+          onClick={handleCreateOrder}
+          loading={loading}
+          className="w-full"
+        >
           Create Order
         </Button>
       </Modal>

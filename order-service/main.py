@@ -36,22 +36,23 @@ async def health_check():
     return {"status": "ok", "service": "order-service"}
 
 
-# ------------------------
-# Create Order
-# ------------------------
-@app.post("/orders", response_model=Order, tags=["Orders"])
+# ✅ CREATE ORDER
+@app.post("/orders", response_model=Order)
 async def create_order(order: OrderCreate):
     order_id = str(uuid.uuid4())
+
+    # Convert list -> JSON string for SQLite
     query = orders.insert().values(
         id=order_id,
         user_id=order.user_id,
-        items=order.items,
+        items=json.dumps(order.items),
         total=order.total,
         status="pending",
         driver_id=None
     )
     await database.execute(query)
 
+    # Publish event
     await publish_event("order.created", {
         "id": order_id,
         "user_id": order.user_id,
@@ -63,14 +64,23 @@ async def create_order(order: OrderCreate):
     return Order(id=order_id, status="pending", **order.dict())
 
 
-# ------------------------
-# List Orders
-# ------------------------
-@app.get("/orders", response_model=list[Order], tags=["Orders"])
+# ✅ LIST ORDERS
+@app.get("/orders", response_model=list[Order])
 async def list_orders():
     query = orders.select()
     results = await database.fetch_all(query)
-    return [Order(**dict(result)) for result in results]
+
+    # Convert JSON string -> list
+    parsed = []
+    for row in results:
+        data = dict(row)
+        try:
+            data["items"] = json.loads(data["items"])
+        except (TypeError, json.JSONDecodeError):
+            data["items"] = []
+        parsed.append(Order(**data))
+
+    return parsed
 
 
 # ------------------------
