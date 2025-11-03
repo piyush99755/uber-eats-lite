@@ -6,7 +6,7 @@ import { Modal } from "../components/Modal";
 interface Order {
   id: string;
   user_id: string;
-  items: string | string[]; // accept both types
+  items: string | string[];
   total: number;
   status: string;
 }
@@ -27,14 +27,20 @@ export default function Orders() {
   const [userId, setUserId] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // ✅ Fetch orders from API
+  // --------------------------
+  // Fetch all orders
+  // --------------------------
   const fetchOrders = async () => {
     try {
       const res = await api.get<Order[]>("/orders/orders");
-      setOrders(res.data);
+      // Reverse for newest-first
+      const sorted = [...res.data].reverse();
+      setOrders(sorted);
+      setError("");
     } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to fetch orders";
       console.error(e);
-      setError(e instanceof Error ? e.message : "Failed to fetch orders");
+      setError(message);
     }
   };
 
@@ -42,7 +48,9 @@ export default function Orders() {
     fetchOrders();
   }, []);
 
-  // Handle menu selection
+  // --------------------------
+  // Handle menu toggle
+  // --------------------------
   const toggleItem = (itemName: string) => {
     setSelectedItems((prev) =>
       prev.includes(itemName)
@@ -54,7 +62,9 @@ export default function Orders() {
   const total = MENU_ITEMS.filter((i) => selectedItems.includes(i.name))
     .reduce((sum, i) => sum + i.price, 0);
 
+  // --------------------------
   // Create new order
+  // --------------------------
   const handleCreateOrder = async () => {
     if (!userId || selectedItems.length === 0) {
       alert("Please provide user ID and select at least one item");
@@ -63,13 +73,16 @@ export default function Orders() {
 
     setLoading(true);
     try {
-      await api.post("/orders/orders", {
+      const res = await api.post<Order>("/orders/orders", {
         user_id: userId,
-        items: selectedItems, // send as string
+        items: selectedItems,
         total,
       });
 
-      await fetchOrders(); // refresh orders immediately
+      // Add new order to top
+      setOrders((prev) => [res.data, ...prev]);
+
+      // Reset form
       setShowModal(false);
       setUserId("");
       setSelectedItems([]);
@@ -81,6 +94,9 @@ export default function Orders() {
     }
   };
 
+  // --------------------------
+  // Render UI
+  // --------------------------
   return (
     <div className="p-6">
       <div className="flex justify-between items-center mb-6">
@@ -88,7 +104,7 @@ export default function Orders() {
         <Button onClick={() => setShowModal(true)}>➕ Create Order</Button>
       </div>
 
-      {error && <p className="text-red-500">Error: {error}</p>}
+      {error && <p className="text-red-500 mb-4">Error: {error}</p>}
 
       <div className="grid gap-3">
         {orders.length ? (

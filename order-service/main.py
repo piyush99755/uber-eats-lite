@@ -36,7 +36,7 @@ async def health_check():
     return {"status": "ok", "service": "order-service"}
 
 
-# ✅ CREATE ORDER
+# CREATE ORDER
 @app.post("/orders", response_model=Order)
 async def create_order(order: OrderCreate):
     order_id = str(uuid.uuid4())
@@ -64,7 +64,7 @@ async def create_order(order: OrderCreate):
     return Order(id=order_id, status="pending", **order.dict())
 
 
-# ✅ LIST ORDERS
+# LIST ORDERS
 @app.get("/orders", response_model=list[Order])
 async def list_orders():
     query = orders.select()
