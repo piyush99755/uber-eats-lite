@@ -17,7 +17,12 @@ export default function Events() {
   const loadEvents = async () => {
     try {
       setLoading(true);
-      const res = await fetch("/notifications/events?limit=50");
+
+      // ✅ Corrected route (goes through API Gateway)
+      const res = await fetch("http://localhost:8000/notifications/events?limit=50");
+
+
+
       if (!res.ok) throw new Error("Failed to fetch events");
       const data: EventLog[] = await res.json();
       setEvents(data);
@@ -85,7 +90,9 @@ export default function Events() {
                       {ev.event_type}
                     </span>
                   </td>
-                  <td className="p-3 text-sm text-gray-700">{ev.source_service}</td>
+                  <td className="p-3 text-sm text-gray-700">
+                    {ev.source_service}
+                  </td>
                   <td className="p-3 text-xs text-gray-600 whitespace-pre-wrap max-w-lg overflow-x-auto">
                     {JSON.stringify(ev.payload, null, 2)}
                   </td>
