@@ -46,14 +46,14 @@ services:
     networks:
       - uber-eats-lite-network
 
-  # --------------------
+    # --------------------
   # User Service
   # --------------------
   user-service:
     build: ./user-service
     container_name: user-service
-    expose:
-      - "8001"
+    ports:
+      - "8001:8000"        # ← Added
     env_file:
       - ./user-service/.env
     environment:
@@ -70,8 +70,8 @@ services:
   driver-service:
     build: ./driver-service
     container_name: driver-service
-    expose:
-      - "8004"
+    ports:
+      - "8004:8000"        # ← Added
     env_file:
       - ./driver-service/.env
     environment:
@@ -88,8 +88,8 @@ services:
   order-service:
     build: ./order-service
     container_name: order-service
-    expose:
-      - "8002"
+    ports:
+      - "8002:8000"        # ← Added
     env_file:
       - ./order-service/.env
     environment:
@@ -106,8 +106,8 @@ services:
   payment-service:
     build: ./payment-service
     container_name: payment-service
-    expose:
-      - "8008"
+    ports:
+      - "8008:8000"        # ← Added
     env_file:
       - ./payment-service/.env
     environment:
@@ -124,8 +124,8 @@ services:
   notification-service:
     build: ./notification-service
     container_name: notification-service
-    expose:
-      - "8003"
+    ports:
+      - "8003:8000"        # ← Added
     env_file:
       - ./notification-service/.env
     environment:
@@ -135,6 +135,7 @@ services:
         condition: service_healthy
     networks:
       - uber-eats-lite-network
+
 
 # --------------------
 # Networks & Volumes

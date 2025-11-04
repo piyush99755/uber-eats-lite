@@ -3,11 +3,12 @@ import json
 import asyncio
 import aioboto3
 from dotenv import load_dotenv
+from events import log_event_to_db  # ✅ Log to DB
 
 load_dotenv()
 
 USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
-QUEUE_URL = os.getenv("NOTIFICATION_SERVICE_QUEUE")
+QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
 EVENT_BUS = os.getenv("EVENT_BUS_NAME")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
@@ -54,36 +55,6 @@ EVENT_HANDLERS = {
 
 
 # -------------------------------
-# Publish Event (for internal notifications)
-# -------------------------------
-async def publish_event(event_type: str, data: dict):
-    """
-    Optionally publish new events (like notification.created) to AWS.
-    """
-    try:
-        if USE_AWS:
-            async with session.client("sqs", region_name=AWS_REGION) as sqs:
-                await sqs.send_message(
-                    QueueUrl=QUEUE_URL,
-                    MessageBody=json.dumps({"type": event_type, "data": data})
-                )
-            async with session.client("events", region_name=AWS_REGION) as eventbridge:
-                await eventbridge.put_events(
-                    Entries=[{
-                        "Source": "notification-service",
-                        "DetailType": event_type,
-                        "Detail": json.dumps(data),
-                        "EventBusName": EVENT_BUS
-                    }]
-                )
-            print(f"[NOTIFY] ✅ Published {event_type} -> AWS")
-        else:
-            print(f"[LOCAL EVENT] {event_type}: {data}")
-    except Exception as e:
-        print(f"[WARN] Failed to publish event {event_type}: {e}")
-
-
-# -------------------------------
 # Poll SQS for incoming messages
 # -------------------------------
 async def poll_sqs():
@@ -116,6 +87,10 @@ async def poll_sqs():
                         event_type = body.get("type", "unknown")
                         data = body.get("data", {})
 
+                        # ✅ Log every incoming event to DB
+                        await log_event_to_db(event_type, data, source_service="notification-service")
+
+                        # Skip duplicate processing
                         event_id = data.get("id") or data.get("event_id")
                         if event_id in processed_events:
                             await sqs.delete_message(
@@ -125,6 +100,7 @@ async def poll_sqs():
                             continue
                         processed_events.add(event_id)
 
+                        # Handle event
                         handler = EVENT_HANDLERS.get(event_type, handle_unknown)
                         if handler == handle_unknown:
                             await handler(event_type, data)
@@ -142,3 +118,7 @@ async def poll_sqs():
             except Exception as e:
                 print(f"[ERROR] Polling failed: {e}")
                 await asyncio.sleep(5)
+
+
+if __name__ == "__main__":
+    asyncio.run(poll_sqs())

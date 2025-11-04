@@ -14,9 +14,7 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 session = aioboto3.Session()
 
-# -------------------------------
-# Event handler: driver.assigned
-# -------------------------------
+
 async def handle_driver_assigned(event_data: dict):
     from models import orders
 
@@ -33,16 +31,17 @@ async def handle_driver_assigned(event_data: dict):
     )
     await database.execute(query)
 
+    print(f"[Order Updated] ✅ Order {order_id} assigned to driver {driver_id}")
+
+    # ✅ Log to DB
+    await log_event_to_db("order.updated", event_data, "order-service")
+
     await publish_event("order.updated", {
         "order_id": order_id,
         "driver_id": driver_id
     })
 
-    print(f"[Order Updated] ✅ Order {order_id} assigned to driver {driver_id}")
 
-# -------------------------------
-# Poll messages from SQS
-# -------------------------------
 async def poll_messages():
     if not USE_AWS:
         print("[Order Consumer] AWS disabled, skipping poll.")
@@ -67,10 +66,11 @@ async def poll_messages():
                     event_type = body.get("type")
                     data = body.get("data", {})
 
+                    await log_event_to_db(event_type, data, "order-service")
+
                     if event_type == "driver.assigned":
                         await handle_driver_assigned(data)
 
-                    # Delete message
                     await sqs.delete_message(
                         QueueUrl=DRIVER_QUEUE_URL,
                         ReceiptHandle=msg["ReceiptHandle"]
@@ -79,3 +79,7 @@ async def poll_messages():
             except Exception as e:
                 print(f"[Order Consumer ERROR] {e}")
                 await asyncio.sleep(5)
+
+
+if __name__ == "__main__":
+    asyncio.run(poll_messages())

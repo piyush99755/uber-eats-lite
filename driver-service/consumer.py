@@ -14,6 +14,7 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 session = aioboto3.Session()
 
+
 async def handle_order_created(event_data: dict):
     from models import drivers
 
@@ -21,7 +22,7 @@ async def handle_order_created(event_data: dict):
     available_drivers = await database.fetch_all(query)
 
     if not available_drivers:
-        print("[Driver Assignment] No available drivers.")
+        print("[Driver Assignment] ❌ No available drivers.")
         return
 
     driver = available_drivers[0]
@@ -33,13 +34,17 @@ async def handle_order_created(event_data: dict):
         drivers.update().where(drivers.c.id == driver_id).values(status="busy")
     )
 
-    print(f"[Driver Assigned] Driver {driver_id} → Order {order_id}")
+    print(f"[Driver Assigned] 🚗 Driver {driver_id} → Order {order_id}")
+
+    # ✅ Log to DB
+    await log_event_to_db("driver.assigned", {"order_id": order_id, "driver_id": driver_id}, "driver-service")
 
     await publish_event("driver.assigned", {
         "order_id": order_id,
         "driver_id": driver_id,
         "user_id": user_id
     })
+
 
 async def poll_messages():
     if not USE_AWS:
@@ -65,10 +70,11 @@ async def poll_messages():
                     event_type = body.get("type")
                     data = body.get("data", {})
 
+                    await log_event_to_db(event_type, data, "driver-service")
+
                     if event_type == "order.created":
                         await handle_order_created(data)
 
-                    # Delete processed message
                     await sqs.delete_message(
                         QueueUrl=ORDER_QUEUE_URL,
                         ReceiptHandle=msg["ReceiptHandle"]
@@ -77,3 +83,7 @@ async def poll_messages():
             except Exception as e:
                 print(f"[Driver Consumer ERROR] {e}")
                 await asyncio.sleep(5)
+
+
+if __name__ == "__main__":
+    asyncio.run(poll_messages())
