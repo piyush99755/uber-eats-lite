@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from database import database, metadata, engine
 from models import notifications
 from schemas import NotificationCreate, Notification
-from consumer import poll_sqs
+from consumer import poll_sqs, publish_event
 
 app = FastAPI(title="Notification Service")
 
@@ -15,6 +15,7 @@ _sqs_task: asyncio.Task | None = None  # Keep track of polling task
 
 @app.on_event("startup")
 async def startup():
+    """Initialize the service, connect to the database and start polling if in AWS mode."""
     await database.connect()
     metadata.create_all(engine)
 
@@ -28,6 +29,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    """Clean up resources and stop the polling task."""
     if USE_AWS and _sqs_task and not _sqs_task.done():
         _sqs_task.cancel()
         try:
@@ -50,6 +52,7 @@ async def create_notification_api(notification: NotificationCreate):
     )
     await database.execute(query)
 
+    # Publish the notification creation event
     await publish_event("notification.created", {
         "id": notification_id,
         "user_id": notification.user_id,

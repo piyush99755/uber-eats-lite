@@ -1,6 +1,8 @@
 # --------------------------------------------
-# Uber Eats Lite - Full Microservices Stack
+# Uber Eats Lite - Full Microservices Stack (AWS mode)
 # --------------------------------------------
+version: "3.9"
+
 services:
   # --------------------
   # PostgreSQL Database
@@ -26,25 +28,6 @@ services:
       retries: 5
 
   # --------------------
-  # LocalStack (AWS mocks)
-  # --------------------
-  localstack:
-    image: localstack/localstack:latest
-    container_name: localstack
-    ports:
-      - "4566:4566"
-    environment:
-      - SERVICES=sqs
-      - DEFAULT_REGION=us-east-1
-    networks:
-      - uber-eats-lite-network
-    healthcheck:
-      test: ["CMD", "awslocal", "sqs", "list-queues"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # --------------------
   # API Gateway
   # --------------------
   api-gateway:
@@ -52,17 +35,14 @@ services:
     container_name: api-gateway
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     depends_on:
-      user-service:
-        condition: service_started
-      driver-service:
-        condition: service_started
-      order-service:
-        condition: service_started
-      payment-service:
-        condition: service_started
-      notification-service:
-        condition: service_started
+      - user-service
+      - driver-service
+      - order-service
+      - payment-service
+      - notification-service
     networks:
       - uber-eats-lite-network
 
@@ -74,16 +54,12 @@ services:
     container_name: user-service
     expose:
       - "8001"
+    env_file:
+      - ./user-service/.env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
-      - AWS_REGION=us-east-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - SQS_ENDPOINT_URL=http://localstack:4566
+      DATABASE_URL: postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
     depends_on:
       postgres:
-        condition: service_healthy
-      localstack:
         condition: service_healthy
     networks:
       - uber-eats-lite-network
@@ -96,16 +72,12 @@ services:
     container_name: driver-service
     expose:
       - "8004"
+    env_file:
+      - ./driver-service/.env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
-      - AWS_REGION=us-east-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - SQS_ENDPOINT_URL=http://localstack:4566
+      DATABASE_URL: postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
     depends_on:
       postgres:
-        condition: service_healthy
-      localstack:
         condition: service_healthy
     networks:
       - uber-eats-lite-network
@@ -118,19 +90,12 @@ services:
     container_name: order-service
     expose:
       - "8002"
+    env_file:
+      - ./order-service/.env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
-      - AWS_REGION=us-east-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - SQS_ENDPOINT_URL=http://localstack:4566
-      - ORDER_QUEUE_URL=http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/order-queue
-      - PAYMENT_QUEUE_URL=http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/payment-queue
-      - NOTIFICATION_QUEUE_URL=http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/notification-queue
+      DATABASE_URL: postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
     depends_on:
       postgres:
-        condition: service_healthy
-      localstack:
         condition: service_healthy
     networks:
       - uber-eats-lite-network
@@ -143,17 +108,12 @@ services:
     container_name: payment-service
     expose:
       - "8008"
+    env_file:
+      - ./payment-service/.env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
-      - AWS_REGION=us-east-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - SQS_ENDPOINT_URL=http://localstack:4566
-      - PAYMENT_QUEUE_URL=http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/payment-queue
+      DATABASE_URL: postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
     depends_on:
       postgres:
-        condition: service_healthy
-      localstack:
         condition: service_healthy
     networks:
       - uber-eats-lite-network
@@ -166,17 +126,12 @@ services:
     container_name: notification-service
     expose:
       - "8003"
+    env_file:
+      - ./notification-service/.env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
-      - AWS_REGION=us-east-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - SQS_ENDPOINT_URL=http://localstack:4566
-      - NOTIFICATION_QUEUE_URL=http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/notification-queue
+      DATABASE_URL: postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
     depends_on:
       postgres:
-        condition: service_healthy
-      localstack:
         condition: service_healthy
     networks:
       - uber-eats-lite-network
