@@ -6,7 +6,8 @@ payments = Table(
     "payments",
     metadata,
     Column("id", String, primary_key=True),
-    Column("order_id", String),
-    Column("amount", Float),
-    Column("status", String)
+    Column("order_id", String, nullable=False),
+    Column("amount", Float, nullable=False),
+    Column("status", String, nullable=False)
 )
+

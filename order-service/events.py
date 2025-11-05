@@ -1,4 +1,3 @@
-# order-service/events.py
 import os
 import json
 import aioboto3

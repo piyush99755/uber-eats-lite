@@ -111,13 +111,15 @@ async def proxy(request: Request, service: str, path: str = ""):
             headers=cors_headers,
         )
 
-    # --- FIX: always include service prefix once ---
-    if not path:
-        path = service
-    elif not path.startswith(service):
-        path = f"{service}/{path}"
+    #  add prefix only if not already present
+    target_base = SERVICES[service].rstrip("/")
+    if not path or path.startswith(service):
+        # path already includes prefix (like /orders/orders)
+        target_url = f"{target_base}/{path}".rstrip("/")
+    else:
+        # add prefix (like /payments/pay)
+        target_url = f"{target_base}/{path}".rstrip("/")
 
-    target_url = f"{SERVICES[service]}/{path}"
     logger.info(f"Proxying {request.method} → {target_url}")
 
     try:

@@ -49,7 +49,7 @@ async def shutdown():
 # ------------------------
 # Health Check
 # ------------------------
-@app.get("/users/health", tags=["Health"])
+@app.get("/health", tags=["Health"])
 def health():
     return {"status": "ok", "service": "user-service"}
 

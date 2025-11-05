@@ -18,7 +18,7 @@ export default function Users() {
 
   const fetchUsers = async () => {
     try {
-      const res = await api.get<User[]>("/users");
+      const res = await api.get<User[]>("/users/users");
       setUsers([...res.data].reverse());
       setError("");
     } catch (err) {
@@ -39,13 +39,14 @@ export default function Users() {
 
     setLoading(true);
     try {
-      const res = await api.post<User>("/users", form);
+      const res = await api.post<User>("/users/users", form);
       setUsers((prev) => [res.data, ...prev]);
       setShowModal(false);
       setForm({ name: "", email: "" });
-    } catch (_err) {
-      alert("Failed to create user");
-    } finally {
+    } catch (_err: unknown) {
+      console.error("Delete user error:", _err);
+      alert("Failed to delete user");
+    }finally {
       setLoading(false);
     }
   };
@@ -55,7 +56,8 @@ export default function Users() {
     try {
       await api.delete(`/users/${id}`);
       setUsers((prev) => prev.filter((u) => u.id !== id));
-    } catch (_err) {
+    } catch (_err: unknown) {
+      console.error("Delete user error:", _err);
       alert("Failed to delete user");
     }
   };

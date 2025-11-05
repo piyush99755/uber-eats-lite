@@ -7,7 +7,7 @@ import asyncio
 load_dotenv()
 
 USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
-NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_SERVICE_QUEUE")
+NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 session = aioboto3.Session()

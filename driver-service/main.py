@@ -57,7 +57,7 @@ async def create_driver(driver: DriverCreate):
 
     return Driver(id=driver_id, status="available", **driver.dict())
 
-@app.get("/drivers/health")
+@app.get("/health")
 async def health():
     return {"status": "driver-service healthy"}
 
