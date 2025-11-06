@@ -1,3 +1,4 @@
+# --- order-service/events.py ---
 import os
 import json
 import aioboto3
@@ -21,6 +22,19 @@ EVENT_BUS = os.getenv("EVENT_BUS_NAME")
 
 session = aioboto3.Session()
 
+# Map events to services
+EVENT_TARGETS = {
+    "order.created": ["Notification Service", "Driver Service", "Payment Service"],
+    "order.updated": ["Notification Service", "Driver Service", "Payment Service"],
+    "order.deleted": ["Notification Service", "Driver Service"],  # Payment ignored
+}
+
+SERVICE_QUEUE_MAP = {
+    "Notification Service": NOTIFICATION_QUEUE_URL,
+    "Driver Service": DRIVER_QUEUE_URL,
+    "Payment Service": PAYMENT_QUEUE_URL,
+}
+
 
 async def publish_event(event_type: str, data: dict):
     """Publish an event to AWS SQS/EventBridge."""
@@ -30,6 +44,7 @@ async def publish_event(event_type: str, data: dict):
         "data": data,
         "source": "order-service",
         "timestamp": event_time,
+        "id": data.get("id") or str(event_time)  # unique id
     }
 
     if not USE_AWS:
@@ -40,41 +55,38 @@ async def publish_event(event_type: str, data: dict):
         async with session.client("sqs", region_name=AWS_REGION) as sqs, \
                    session.client("events", region_name=AWS_REGION) as eventbridge:
 
-            # Send to other services
-            targets = {
-                "Notification Service": NOTIFICATION_QUEUE_URL,
-                "Driver Service": DRIVER_QUEUE_URL,
-                "Payment Service": PAYMENT_QUEUE_URL,
-            }
-
-            for name, queue_url in targets.items():
+            for service_name in EVENT_TARGETS.get(event_type, []):
+                queue_url = SERVICE_QUEUE_MAP.get(service_name)
                 if not queue_url:
-                    logger.warning(f"[WARN] {name} queue URL not set, skipping.")
+                    logger.warning(f"[WARN] {service_name} queue not set, skipping")
                     continue
-
                 try:
                     await sqs.send_message(
                         QueueUrl=queue_url,
                         MessageBody=json.dumps(message_body),
                     )
-                    logger.info(f"[SQS SENT → {name}] {event_type}")
+                    logger.info(f"[SQS SENT → {service_name}] {event_type}")
                 except Exception as e:
-                    logger.warning(f"[SQS ERROR] {name}: {e}")
+                    logger.warning(f"[SQS ERROR → {service_name}] {e}")
 
-            # Publish to EventBridge
-            if EVENT_BUS:
-                try:
-                    await eventbridge.put_events(
-                        Entries=[{
-                            "Source": "order-service",
-                            "DetailType": event_type,
-                            "Detail": json.dumps(data),
-                            "EventBusName": EVENT_BUS,
-                        }]
-                    )
-                    logger.info(f"[EventBridge] Published {event_type}")
-                except Exception as e:
-                    logger.warning(f"[EventBridge ERROR] {e}")
+            # Optionally publish to EventBridge
+            # --- Skip EventBridge during local/dev mode to avoid duplicate deliveries ---
+        if EVENT_BUS and os.getenv("USE_EVENTBRIDGE", "false").lower() in ("true", "1", "yes"):
+            try:
+                await eventbridge.put_events(
+                    Entries=[{
+                        "Source": "order-service",
+                        "DetailType": event_type,
+                        "Detail": json.dumps(data),
+                        "EventBusName": EVENT_BUS,
+                    }]
+                )
+                logger.info(f"[EventBridge] Published {event_type}")
+            except Exception as e:
+                logger.warning(f"[EventBridge ERROR] {e}")
+        else:
+            logger.debug(f"[EventBridge] Skipped for {event_type}")
+
 
     except Exception as e:
         logger.error(f"[EVENT ERROR] Failed to publish {event_type}: {e}")

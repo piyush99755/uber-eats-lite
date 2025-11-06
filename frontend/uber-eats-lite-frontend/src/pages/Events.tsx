@@ -19,7 +19,8 @@ export default function Events() {
       setLoading(true);
 
       // ✅ Corrected route (goes through API Gateway)
-      const res = await fetch("http://localhost:8000/notifications/events?limit=50");
+      const res = await fetch("http://localhost:8000/notifications/notifications/events?limit=50");
+
 
 
 

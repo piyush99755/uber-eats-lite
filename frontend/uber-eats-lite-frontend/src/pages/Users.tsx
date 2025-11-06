@@ -3,12 +3,24 @@ import api from "../api/api";
 import { Button } from "../components/Button";
 import { Modal } from "../components/Modal";
 
+// ----------------------
+// Types
+// ----------------------
 interface User {
   id: string;
   name: string;
   email: string;
 }
 
+interface APIResponse<T> {
+  success: boolean;
+  data: T;
+  message?: string;
+}
+
+// ----------------------
+// Component
+// ----------------------
 export default function Users() {
   const [users, setUsers] = useState<User[]>([]);
   const [error, setError] = useState("");
@@ -16,11 +28,24 @@ export default function Users() {
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState({ name: "", email: "" });
 
+  // ----------------------
+  // Base API Gateway path
+  // ----------------------
+  const API_BASE = "/users"; // API Gateway expects /users/users for user-service
+
+  // ----------------------
+  // Fetch Users
+  // ----------------------
   const fetchUsers = async () => {
     try {
-      const res = await api.get<User[]>("/users/users");
-      setUsers([...res.data].reverse());
-      setError("");
+      const res = await api.get<APIResponse<User[]>>(`${API_BASE}/users`);
+      if (res.data.success && res.data.data) {
+        setUsers([...res.data.data].reverse());
+        setError("");
+      } else {
+        setUsers([]);
+        setError(res.data.message || "Failed to fetch users");
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
@@ -31,6 +56,9 @@ export default function Users() {
     fetchUsers();
   }, []);
 
+  // ----------------------
+  // Create User
+  // ----------------------
   const handleCreateUser = async () => {
     if (!form.name || !form.email) {
       alert("Please fill all fields");
@@ -39,29 +67,44 @@ export default function Users() {
 
     setLoading(true);
     try {
-      const res = await api.post<User>("/users/users", form);
-      setUsers((prev) => [res.data, ...prev]);
-      setShowModal(false);
-      setForm({ name: "", email: "" });
-    } catch (_err: unknown) {
-      console.error("Delete user error:", _err);
-      alert("Failed to delete user");
-    }finally {
+      const res = await api.post<APIResponse<User>>(`${API_BASE}/users`, form);
+      if (res.data.success && res.data.data) {
+        setUsers((prev) => [res.data.data, ...prev]);
+        setShowModal(false);
+        setForm({ name: "", email: "" });
+      } else {
+        alert(res.data.message || "Failed to create user");
+      }
+    } catch (err) {
+      console.error("Create user error:", err);
+      alert("Failed to create user");
+    } finally {
       setLoading(false);
     }
   };
 
+  // ----------------------
+  // Delete User
+  // ----------------------
   const handleDeleteUser = async (id: string) => {
     if (!confirm("Delete this user?")) return;
+
     try {
-      await api.delete(`/users/${id}`);
-      setUsers((prev) => prev.filter((u) => u.id !== id));
-    } catch (_err: unknown) {
-      console.error("Delete user error:", _err);
+      const res = await api.delete<APIResponse<null>>(`${API_BASE}/users/${id}`);
+      if (res.data.success) {
+        setUsers((prev) => prev.filter((u) => u.id !== id));
+      } else {
+        alert(res.data.message || "Failed to delete user");
+      }
+    } catch (err) {
+      console.error("Delete user error:", err);
       alert("Failed to delete user");
     }
   };
 
+  // ----------------------
+  // Render
+  // ----------------------
   return (
     <div className="p-6">
       <div className="flex justify-between items-center mb-6">

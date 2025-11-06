@@ -18,6 +18,9 @@ notifications = Table(
 # ---------------------------------------------------------------------------
 # Events Table  (for Event Dashboard)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Events Table  (for Event Dashboard)
+# ---------------------------------------------------------------------------
 events = Table(
     "events",
     metadata,
@@ -27,5 +30,6 @@ events = Table(
     Column("occurred_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("payload", JSON, nullable=False),
     Column("metadata", JSON, nullable=True),
+    Column("message", Text, nullable=True), 
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
 )

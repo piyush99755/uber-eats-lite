@@ -19,22 +19,21 @@ logger.setLevel(logging.INFO)
 USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# Queues for inter-service communication
-ORDER_QUEUE_URL = os.getenv("ORDER_SERVICE_QUEUE")
+# Notification service queue (primary consumer)
 NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
-PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL")
 EVENT_BUS = os.getenv("EVENT_BUS_NAME")
 
+# Initialize aioboto3 session
 session = aioboto3.Session()
+
 
 # ---------------------------------------------------------------------------
 # Event Publisher
 # ---------------------------------------------------------------------------
 async def publish_event(event_type: str, data: dict):
     """
-    Publish user-related events (user.created, user.updated, etc.)
-    to other services via AWS SQS and EventBridge.
-    The Notification Service will consume and log these events.
+    Publish user-related events (user.created, user.updated, user.deleted)
+    to a single channel to avoid duplicates.
     """
     event_time = datetime.utcnow().isoformat()
     message_body = {
@@ -53,26 +52,23 @@ async def publish_event(event_type: str, data: dict):
         async with session.client("sqs", region_name=AWS_REGION) as sqs, \
                    session.client("events", region_name=AWS_REGION) as eventbridge:
 
-            # Send to multiple service queues
-            for queue_name, queue_url in [
-                ("Order Service", ORDER_QUEUE_URL),
-                ("Notification Service", NOTIFICATION_QUEUE_URL),
-                ("Payment Service", PAYMENT_QUEUE_URL),
-            ]:
-                if not queue_url:
-                    logger.warning(f"[WARN] Missing {queue_name} queue URL — skipping.")
-                    continue
-
+            # ----------------------------
+            # Prefer SQS if configured
+            # ----------------------------
+            if NOTIFICATION_QUEUE_URL:
                 try:
                     await sqs.send_message(
-                        QueueUrl=queue_url,
+                        QueueUrl=NOTIFICATION_QUEUE_URL,
                         MessageBody=json.dumps(message_body)
                     )
-                    logger.info(f"[SQS SENT → {queue_name}] {event_type}")
+                    logger.info(f"[SQS SENT → Notification Service] {event_type}")
                 except Exception as e:
-                    logger.warning(f"[SQS ERROR → {queue_name}] {e}")
+                    logger.warning(f"[SQS ERROR → Notification Service] {e}")
+                return  # ✅ stop here to avoid EventBridge duplication
 
-            # Publish to AWS EventBridge (optional)
+            # ----------------------------
+            # Fallback to EventBridge if SQS not configured
+            # ----------------------------
             if EVENT_BUS:
                 try:
                     await eventbridge.put_events(
@@ -89,3 +85,21 @@ async def publish_event(event_type: str, data: dict):
 
     except Exception as e:
         logger.error(f"[EVENT ERROR] Failed to publish {event_type}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Convenience wrappers for specific user events
+# ---------------------------------------------------------------------------
+async def user_created(user: dict):
+    """Emit user.created event."""
+    await publish_event("user.created", user)
+
+
+async def user_updated(user: dict):
+    """Emit user.updated event."""
+    await publish_event("user.updated", user)
+
+
+async def user_deleted(user_id: str):
+    """Emit user.deleted event."""
+    await publish_event("user.deleted", {"id": user_id})

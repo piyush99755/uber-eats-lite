@@ -10,4 +10,3 @@ payments = Table(
     Column("amount", Float, nullable=False),
     Column("status", String, nullable=False)
 )
-

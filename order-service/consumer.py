@@ -1,3 +1,4 @@
+# --- order-service/consumer.py ---
 import asyncio
 import json
 import os
@@ -14,6 +15,24 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 session = aioboto3.Session()
 
+# Simple in-memory store to prevent processing the same event twice
+processed_events = set()
+
+
+async def log_event_to_db(event_type: str, data: dict):
+    """
+    Optional: store events in DB to make consumer fully idempotent.
+    Currently, we just log to console.
+    """
+    event_id = data.get("id")
+    if event_id in processed_events:
+        print(f"[SKIP] Event {event_type} with ID {event_id} already processed")
+        return False
+
+    processed_events.add(event_id)
+    print(f"[LOG] Event logged: {event_type} -> {data}")
+    return True
+
 
 async def handle_driver_assigned(event_data: dict):
     from models import orders
@@ -25,6 +44,7 @@ async def handle_driver_assigned(event_data: dict):
         print("[WARN] Missing order_id or driver_id in driver.assigned event")
         return
 
+    # Update order status
     query = orders.update().where(orders.c.id == order_id).values(
         driver_id=driver_id,
         status="assigned"
@@ -33,9 +53,10 @@ async def handle_driver_assigned(event_data: dict):
 
     print(f"[Order Updated] ✅ Order {order_id} assigned to driver {driver_id}")
 
-    # ✅ Log to DB
-    await log_event_to_db("order.updated", event_data, "order-service")
+    # Log to DB / cache
+    await log_event_to_db("order.updated", event_data)
 
+    # Publish updated event to other services
     await publish_event("order.updated", {
         "order_id": order_id,
         "driver_id": driver_id
@@ -66,11 +87,20 @@ async def poll_messages():
                     event_type = body.get("type")
                     data = body.get("data", {})
 
-                    await log_event_to_db(event_type, data, "order-service")
+                    # Idempotency check
+                    already_processed = not await log_event_to_db(event_type, data)
+                    if already_processed:
+                        await sqs.delete_message(
+                            QueueUrl=DRIVER_QUEUE_URL,
+                            ReceiptHandle=msg["ReceiptHandle"]
+                        )
+                        continue
 
+                    # Handle driver assigned
                     if event_type == "driver.assigned":
                         await handle_driver_assigned(data)
 
+                    # Delete message from SQS after processing
                     await sqs.delete_message(
                         QueueUrl=DRIVER_QUEUE_URL,
                         ReceiptHandle=msg["ReceiptHandle"]

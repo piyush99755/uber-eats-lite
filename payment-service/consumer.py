@@ -1,3 +1,4 @@
+# --- payment-service/consumer.py ---
 import os
 import json
 import asyncio
@@ -11,7 +12,7 @@ from events import publish_event
 
 load_dotenv()
 
-# ─── Environment Setup ──────────────────────────────────────────────
+# ─── Environment Setup ─────────────────────────────────────────────
 USE_AWS = os.getenv("USE_AWS", "False").lower() == "true"
 USE_STRIPE = os.getenv("USE_STRIPE", "False").lower() == "true"
 
@@ -30,43 +31,42 @@ else:
 session = aioboto3.Session()
 sqs_kwargs = {"region_name": AWS_REGION}
 
-if USE_AWS:
-    print(f"[PAYMENT] Listening for OrderCreated events from SQS: {ORDER_QUEUE_URL}")
-else:
-    print("[PAYMENT] Local mode — skipping SQS polling.")
+# In-memory cache for processed order IDs to prevent duplicate payments
+processed_orders = set()
+
 
 # ─── Core Payment Processor ─────────────────────────────────────────
 async def process_order_payment(order_event: dict):
-    """Handle payment processing for an incoming order event."""
+    """Process payment only for new orders."""
+    order_id = order_event.get("id")
+    user_id = order_event.get("user_id")
+    amount = float(order_event.get("total", 0))
+
+    if not order_id or order_id in processed_orders:
+        print(f"[SKIP] Order {order_id} already processed or invalid.")
+        return
+
+    processed_orders.add(order_id)
+    payment_id = str(uuid4())
+    status = "pending"
+
+    print(f"[PAYMENT] 🔄 Processing payment for Order {order_id} — Amount: ${amount}")
+
+    # Process via Stripe or simulate locally
     try:
-        payment_id = str(uuid4())
-        user_id = order_event.get("user_id")
-        order_id = order_event.get("id")
-        amount = float(order_event.get("total", 0))
-        status = "pending"
-
-        print(f"[PAYMENT] 🔄 Processing payment for Order {order_id} — Amount: ${amount}")
-
-        # Process via Stripe or simulate locally
         if USE_STRIPE:
-            print(f"[PAYMENT] 💳 Charging Stripe for order {order_id}")
-            try:
-                charge = stripe.Charge.create(
-                    amount=int(amount * 100),  # convert to cents
-                    currency="usd",
-                    description=f"Payment for Order {order_id}",
-                    source="tok_visa",  # Stripe test token
-                )
-                status = "paid" if charge["status"] == "succeeded" else "failed"
-            except Exception as stripe_err:
-                print(f"[STRIPE ERROR] {stripe_err}")
-                status = "failed"
+            charge = stripe.Charge.create(
+                amount=int(amount * 100),  # convert to cents
+                currency="usd",
+                description=f"Payment for Order {order_id}",
+                source="tok_visa",  # Test token
+            )
+            status = "paid" if charge["status"] == "succeeded" else "failed"
         else:
-            # Simulate instant payment success
             await asyncio.sleep(1)
             status = "paid"
 
-        # Save payment record
+        # Save payment record in DB
         query = payments.insert().values(
             id=payment_id,
             order_id=order_id,
@@ -77,7 +77,7 @@ async def process_order_payment(order_event: dict):
 
         print(f"[PAYMENT] ✅ Payment {status.upper()} for Order {order_id}")
 
-        # Publish success/failure event
+        # Publish event to Notification Service
         event_type = "payment.processed" if status == "paid" else "payment.failed"
         await publish_event(event_type, {
             "payment_id": payment_id,
@@ -88,15 +88,17 @@ async def process_order_payment(order_event: dict):
         })
 
     except Exception as e:
-        print(f"[ERROR] Failed to process payment for order {order_event.get('id')}: {e}")
+        print(f"[ERROR] Failed to process payment for Order {order_id}: {e}")
         await publish_event("payment.failed", {
-            "order_id": order_event.get("id"),
+            "order_id": order_id,
+            "user_id": user_id,
             "error": str(e)
         })
 
+
 # ─── Poller (SQS Consumer) ──────────────────────────────────────────
 async def poll_orders():
-    """Continuously poll SQS for new order.created events."""
+    """Poll SQS for order.created events only."""
     if not USE_AWS:
         print("[PAYMENT] Local mode: skipping SQS polling.")
         while True:
@@ -104,7 +106,8 @@ async def poll_orders():
         return
 
     async with session.client("sqs", **sqs_kwargs) as sqs:
-        print("[PAYMENT] 🚀 SQS polling started...")
+        print(f"[PAYMENT] 🚀 Listening for OrderCreated events on {ORDER_QUEUE_URL}")
+
         while True:
             try:
                 response = await sqs.receive_message(
@@ -121,14 +124,20 @@ async def poll_orders():
                 for msg in messages:
                     try:
                         body = json.loads(msg["Body"])
+                        event_type = body.get("type") or body.get("detail-type", "")
 
-                        if "type" in body and body["type"].lower() == "order.created":
-                            order_event = body["data"]
-                        elif "detail-type" in body and body["detail-type"].lower() == "order.created":
-                            detail = body["detail"]
-                            order_event = json.loads(detail) if isinstance(detail, str) else detail
-                        else:
-                            order_event = body
+                        # Only process order.created
+                        if event_type.lower() != "order.created":
+                            print(f"[SKIP] Ignoring event {event_type}")
+                            await sqs.delete_message(
+                                QueueUrl=ORDER_QUEUE_URL,
+                                ReceiptHandle=msg["ReceiptHandle"]
+                            )
+                            continue
+
+                        order_event = body.get("data") or body.get("detail") or body
+                        if isinstance(order_event, str):
+                            order_event = json.loads(order_event)
 
                         await process_order_payment(order_event)
 
@@ -137,7 +146,7 @@ async def poll_orders():
                             QueueUrl=ORDER_QUEUE_URL,
                             ReceiptHandle=msg["ReceiptHandle"]
                         )
-                        print(f"[PAYMENT] 🗑️ Deleted processed message for order {order_event.get('id')}")
+                        print(f"[PAYMENT] 🗑️ Deleted message for Order {order_event.get('id')}")
 
                     except Exception as msg_err:
                         print(f"[ERROR] Failed to process message: {msg_err}")
@@ -145,6 +154,7 @@ async def poll_orders():
             except Exception as e:
                 print(f"[ERROR] Polling failed: {e}")
                 await asyncio.sleep(5)
+
 
 # ─── Entrypoint ─────────────────────────────────────────────────────
 if __name__ == "__main__":
