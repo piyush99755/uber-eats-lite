@@ -4,6 +4,8 @@ import aioboto3
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
+from database import database
+from models import processed_events
 
 # ---------------------------------------------------------------------------
 # Load environment variables
@@ -103,3 +105,30 @@ async def user_updated(user: dict):
 async def user_deleted(user_id: str):
     """Emit user.deleted event."""
     await publish_event("user.deleted", {"id": user_id})
+    
+async def log_event_to_db(event_type: str, data: dict, source_service: str):
+    """
+    Stores processed event in DB for idempotency.
+    Returns True if it's a new event; False if already processed.
+    """
+    event_id = data.get("id") or data.get("event_id")
+    if not event_id:
+        return False
+
+    # Check if event_id already exists
+    query_check = processed_events.select().where(processed_events.c.event_id == event_id)
+    existing = await database.fetch_one(query_check)
+    if existing:
+        print(f"[SKIP] Event {event_id} already processed in {source_service}")
+        return False
+
+    # Insert new record
+    query_insert = processed_events.insert().values(
+        event_id=event_id,
+        event_type=event_type,
+        source_service=source_service,
+        processed_at=datetime.utcnow(),
+    )
+    await database.execute(query_insert)
+    print(f"[LOGGED] Event {event_type} ({event_id}) from {source_service}")
+    return True

@@ -5,6 +5,9 @@ import aioboto3
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
+from database import database
+from models import processed_events
+
 
 load_dotenv()
 
@@ -90,3 +93,32 @@ async def publish_event(event_type: str, data: dict):
 
     except Exception as e:
         logger.error(f"[EVENT ERROR] Failed to publish {event_type}: {e}")
+
+
+async def log_event_to_db(event_type: str, data: dict, source_service: str):
+    """
+    Logs event to processed_events table for idempotency.
+    Returns True if this is a new event; False if already processed.
+    """
+    event_id = data.get("id") or data.get("event_id")
+    if not event_id:
+        print(f"[WARN] Missing event ID for {event_type}")
+        return True  # still process, just log warning
+
+    # Check for duplicates
+    query_check = processed_events.select().where(processed_events.c.event_id == event_id)
+    existing = await database.fetch_one(query_check)
+    if existing:
+        print(f"[SKIP] Duplicate {event_type} ({event_id}) — already handled by {source_service}")
+        return False
+
+    # Insert new event record
+    query_insert = processed_events.insert().values(
+        event_id=event_id,
+        event_type=event_type,
+        source_service=source_service,
+        processed_at=datetime.utcnow(),
+    )
+    await database.execute(query_insert)
+    print(f"[LOGGED] {event_type} ({event_id}) from {source_service}")
+    return True

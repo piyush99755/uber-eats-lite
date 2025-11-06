@@ -29,6 +29,14 @@ event_logs = Table(
     Column("created_at", DateTime, default=datetime.utcnow)
 )
 
+processed_events = Table(
+    "processed_events",
+    metadata,
+    Column("event_id", String, primary_key=True),
+    Column("event_type", String, nullable=False),
+    Column("source_service", String, nullable=False),
+    Column("processed_at", DateTime, default=datetime.utcnow)
+)
 # ------------------------
 # Create tables
 # ------------------------

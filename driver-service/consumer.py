@@ -4,7 +4,9 @@ import os
 import aioboto3
 from dotenv import load_dotenv
 from database import database
-from events import publish_event
+from events import publish_event, log_event_to_db
+
+
 
 load_dotenv()
 
@@ -70,10 +72,14 @@ async def poll_messages():
                     event_type = body.get("type")
                     data = body.get("data", {})
 
-                    await log_event_to_db(event_type, data, "driver-service")
+                    processed = await log_event_to_db(event_type, data, "driver-service")
+                    if not processed:
+                        print(f"[DUPLICATE] Skipping reprocessing of {event_type} ({data.get('id')})")
+                        continue
 
                     if event_type == "order.created":
                         await handle_order_created(data)
+
 
                     await sqs.delete_message(
                         QueueUrl=ORDER_QUEUE_URL,

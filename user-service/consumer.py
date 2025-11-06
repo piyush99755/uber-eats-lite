@@ -22,8 +22,12 @@ async def handle_message(message: dict):
     event_type = message.get("type")
     data = message.get("data", {})
 
-    # Log to DB
-    await log_event_to_db(event_type, data, "user-service")
+    # Log to DB (and skip duplicates)
+    processed = await log_event_to_db(event_type, data, "user-service")
+    if not processed:
+        logger.info(f"🟡 Duplicate event skipped: {event_type} ({data.get('id')})")
+        return
+
 
     # Example logging
     if event_type == "order.created":

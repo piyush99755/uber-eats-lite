@@ -9,6 +9,7 @@ import stripe
 from database import database
 from models import payments
 from events import publish_event
+from sqlalchemy import select
 
 load_dotenv()
 
@@ -37,36 +38,40 @@ processed_orders = set()
 
 # ─── Core Payment Processor ─────────────────────────────────────────
 async def process_order_payment(order_event: dict):
-    """Process payment only for new orders."""
     order_id = order_event.get("id")
     user_id = order_event.get("user_id")
     amount = float(order_event.get("total", 0))
 
-    if not order_id or order_id in processed_orders:
-        print(f"[SKIP] Order {order_id} already processed or invalid.")
+    if not order_id:
+        print("[PAYMENT] ⚠️ Missing order ID, skipping.")
         return
 
-    processed_orders.add(order_id)
+    # ✅ Check DB for existing payment (idempotency)
+    existing = await database.fetch_one(
+        select(payments).where(payments.c.order_id == order_id)
+    )
+    if existing:
+        print(f"[PAYMENT] 🔁 Order {order_id} already processed — skipping duplicate payment.")
+        return
+
     payment_id = str(uuid4())
     status = "pending"
-
     print(f"[PAYMENT] 🔄 Processing payment for Order {order_id} — Amount: ${amount}")
 
-    # Process via Stripe or simulate locally
     try:
         if USE_STRIPE:
             charge = stripe.Charge.create(
-                amount=int(amount * 100),  # convert to cents
+                amount=int(amount * 100),
                 currency="usd",
                 description=f"Payment for Order {order_id}",
-                source="tok_visa",  # Test token
+                source="tok_visa",
             )
             status = "paid" if charge["status"] == "succeeded" else "failed"
         else:
             await asyncio.sleep(1)
             status = "paid"
 
-        # Save payment record in DB
+        # ✅ Safe insert (if another instance processed, DB constraint will prevent duplicates)
         query = payments.insert().values(
             id=payment_id,
             order_id=order_id,
@@ -76,8 +81,6 @@ async def process_order_payment(order_event: dict):
         await database.execute(query)
 
         print(f"[PAYMENT] ✅ Payment {status.upper()} for Order {order_id}")
-
-        # Publish event to Notification Service
         event_type = "payment.processed" if status == "paid" else "payment.failed"
         await publish_event(event_type, {
             "payment_id": payment_id,
@@ -88,13 +91,15 @@ async def process_order_payment(order_event: dict):
         })
 
     except Exception as e:
-        print(f"[ERROR] Failed to process payment for Order {order_id}: {e}")
-        await publish_event("payment.failed", {
-            "order_id": order_id,
-            "user_id": user_id,
-            "error": str(e)
-        })
-
+        if "uix_order_id" in str(e):
+            print(f"[PAYMENT] ⚠️ Duplicate insert ignored for Order {order_id}")
+        else:
+            print(f"[ERROR] Failed to process payment for Order {order_id}: {e}")
+            await publish_event("payment.failed", {
+                "order_id": order_id,
+                "user_id": user_id,
+                "error": str(e)
+            })
 
 # ─── Poller (SQS Consumer) ──────────────────────────────────────────
 async def poll_orders():

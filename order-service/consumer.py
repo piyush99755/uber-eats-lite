@@ -5,7 +5,9 @@ import os
 import aioboto3
 from dotenv import load_dotenv
 from database import database
-from events import publish_event
+from events import publish_event, log_event_to_db
+
+
 
 load_dotenv()
 
@@ -15,23 +17,6 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 session = aioboto3.Session()
 
-# Simple in-memory store to prevent processing the same event twice
-processed_events = set()
-
-
-async def log_event_to_db(event_type: str, data: dict):
-    """
-    Optional: store events in DB to make consumer fully idempotent.
-    Currently, we just log to console.
-    """
-    event_id = data.get("id")
-    if event_id in processed_events:
-        print(f"[SKIP] Event {event_type} with ID {event_id} already processed")
-        return False
-
-    processed_events.add(event_id)
-    print(f"[LOG] Event logged: {event_type} -> {data}")
-    return True
 
 
 async def handle_driver_assigned(event_data: dict):
@@ -88,8 +73,9 @@ async def poll_messages():
                     data = body.get("data", {})
 
                     # Idempotency check
-                    already_processed = not await log_event_to_db(event_type, data)
-                    if already_processed:
+                    processed = await log_event_to_db(event_type, data, "order-service")
+                    if not processed:
+                        print(f"[DUPLICATE] Skipping reprocessing of {event_type} ({data.get('id')})")
                         await sqs.delete_message(
                             QueueUrl=DRIVER_QUEUE_URL,
                             ReceiptHandle=msg["ReceiptHandle"]

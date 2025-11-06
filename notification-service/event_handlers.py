@@ -1,12 +1,19 @@
 # event_handlers.py
+# event_handlers.py
 
-# Mapping of event types to frontend-friendly messages
 EVENT_MESSAGES = {
     "user.created": lambda payload: f"New user registered: {payload['name']} ({payload['email']})",
+    "user.deleted": lambda payload: f"🧹 User deleted: {payload['id']}",
+
     "driver.created": lambda payload: f"New driver joined: {payload['name']} ({payload['vehicle']})",
+    "driver.deleted": lambda payload: f"🧹 Driver deleted: {payload['id']}",
+
     "order.created": lambda payload: f"Order placed by {payload['user_id']} with total ${payload['total']}",
+    "order.deleted": lambda payload: f"🧹 Order deleted: {payload['id']}",
+
     "payment.processed": lambda payload: f"Payment completed for order {payload['order_id']} amount ${payload['amount']}",
     "payment.failed": lambda payload: f"Payment failed for order {payload.get('order_id', 'unknown')}: {payload['error']}",
+
     "delivery.assigned": lambda payload: f"Driver {payload['driver_id']} assigned to order {payload['order_id']}",
 }
 
