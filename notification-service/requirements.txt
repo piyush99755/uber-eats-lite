@@ -8,6 +8,7 @@ databases==0.9.0
 aiosqlite==0.21.0
 asyncpg
 psycopg2-binary
+prometheus-client==0.18.0
 
 
 # AWS (async)

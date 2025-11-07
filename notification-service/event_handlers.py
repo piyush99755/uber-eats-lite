@@ -1,5 +1,4 @@
 # event_handlers.py
-# event_handlers.py
 
 EVENT_MESSAGES = {
     "user.created": lambda payload: f"New user registered: {payload['name']} ({payload['email']})",
@@ -17,11 +16,12 @@ EVENT_MESSAGES = {
     "delivery.assigned": lambda payload: f"Driver {payload['driver_id']} assigned to order {payload['order_id']}",
 }
 
-def format_event(event_type: str, payload: dict) -> str:
-    """Return a frontend-friendly message for a given event type."""
+def format_event(event_type: str, payload: dict, trace_id: str | None = None) -> str:
+    """Return a frontend-friendly message for a given event type. Optional trace_id for logs."""
+    prefix = f"[trace:{trace_id}] " if trace_id else ""
     if event_type in EVENT_MESSAGES:
         try:
-            return EVENT_MESSAGES[event_type](payload)
+            return prefix + EVENT_MESSAGES[event_type](payload)
         except Exception as e:
-            return f"[Error formatting event {event_type}] {e}"
-    return f"[Unknown event] {event_type} → {payload}"
+            return prefix + f"[Error formatting event {event_type}] {e}"
+    return prefix + f"[Unknown event] {event_type} → {payload}"
