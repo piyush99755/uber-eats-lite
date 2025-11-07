@@ -2,12 +2,12 @@ import asyncio
 from fastapi import FastAPI
 from uuid import uuid4
 from typing import List, Optional
-
 from database import database, metadata, engine
 from models import drivers
 from schemas import DriverCreate, Driver
 from events import publish_event
 from consumer import poll_messages  # background consumer
+from fastapi import HTTPException
 
 app = FastAPI(title="Driver Service")
 
@@ -75,3 +75,29 @@ async def delete_driver(driver_id: str):
 
     await publish_event("driver.deleted", {"id": driver_id})
     return {"message": f"Driver {driver_id} deleted successfully"}
+
+@app.put("/drivers/{driver_id}", response_model=Driver, tags=["Drivers"])
+async def update_driver(driver_id: str, driver: DriverCreate):
+    # Check if driver exists
+    query = drivers.select().where(drivers.c.id == driver_id)
+    existing_driver = await database.fetch_one(query)
+    if not existing_driver:
+        raise HTTPException(status_code=404, detail="Driver not found")
+
+    # Update driver
+    update_query = drivers.update().where(drivers.c.id == driver_id).values(
+        name=driver.name,
+        vehicle=driver.vehicle,
+        license_number=driver.license_number
+    )
+    await database.execute(update_query)
+
+    # Publish event
+    await publish_event("driver.updated", {
+        "id": driver_id,
+        "name": driver.name,
+        "vehicle": driver.vehicle,
+        "license_number": driver.license_number
+    })
+
+    return Driver(id=driver_id, status=existing_driver["status"], **driver.dict())

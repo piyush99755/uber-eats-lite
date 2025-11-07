@@ -2,16 +2,18 @@ import { useEffect, useState } from "react";
 import api from "../api/api";
 import { Button } from "../components/Button";
 import { Modal } from "../components/Modal";
+import { ToastContainer, toast } from "react-toastify";
+import "react-toastify/dist/ReactToastify.css";
 
 interface Order {
   id: string;
   user_id: string;
-  items: string | string[];
-  total: number;
-  status: string;
+  items: string[];
+  total?: number;
+  status?: "pending" | "paid" | "completed" | "delivered";
+  driver_id?: string;
 }
 
-// TEMP MENU — will be replaced by dynamic API later
 const MENU_ITEMS = [
   { name: "Burger", price: 8 },
   { name: "Fries", price: 4 },
@@ -22,174 +24,222 @@ const MENU_ITEMS = [
 
 export default function Orders() {
   const [orders, setOrders] = useState<Order[]>([]);
+  const [drivers, setDrivers] = useState<{ id: string; name: string }[]>([]);
   const [error, setError] = useState("");
   const [showModal, setShowModal] = useState(false);
-  const [selectedItems, setSelectedItems] = useState<string[]>([]);
-  const [userId, setUserId] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // --------------------------
-  // Fetch all orders
-  // --------------------------
+  const [form, setForm] = useState({
+    user_id: "",
+    items: [] as string[],
+    driver_id: "",
+    status: "pending" as Order["status"],
+  });
+
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  // --- Fetch orders and drivers ---
   const fetchOrders = async () => {
     try {
       const res = await api.get<Order[]>("/orders/orders");
-      setOrders([...res.data].reverse()); // newest-first
-      setError("");
-    } catch (e) {
-      const message = e instanceof Error ? e.message : "Failed to fetch orders";
-      console.error(e);
-      setError(message);
+      setOrders([...res.data].reverse());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch orders");
+      toast.error("Failed to fetch orders");
+    }
+  };
+
+  const fetchDrivers = async () => {
+    try {
+      const res = await api.get<{ id: string; name: string }[]>("/drivers/drivers");
+      setDrivers(res.data);
+    } catch {
+      toast.error("Failed to fetch drivers");
     }
   };
 
   useEffect(() => {
     fetchOrders();
+    fetchDrivers();
   }, []);
 
-  // --------------------------
-  // Create new order
-  // --------------------------
-  const handleCreateOrder = async () => {
-    if (!userId || selectedItems.length === 0) {
-      alert("Please provide user ID and select at least one item");
+  // --- Open modal for editing ---
+  const handleEdit = (order: Order) => {
+    setForm({
+      user_id: order.user_id,
+      items: order.items,
+      driver_id: order.driver_id || "",
+      status: order.status || "pending",
+    });
+    setEditingId(order.id);
+    setShowModal(true);
+  };
+
+  // --- Create or update order ---
+  const handleSubmit = async () => {
+    if (!form.user_id || form.items.length === 0) {
+      toast.error("Please provide user ID and select items");
       return;
     }
 
     setLoading(true);
+    const total = MENU_ITEMS.filter((i) => form.items.includes(i.name))
+      .reduce((sum, i) => sum + i.price, 0);
+
     try {
-      const total = MENU_ITEMS.filter((i) => selectedItems.includes(i.name))
-        .reduce((sum, i) => sum + i.price, 0);
-
-      const res = await api.post<Order>("/orders/orders", {
-        user_id: userId,
-        items: selectedItems,
-        total,
-      });
-
-      setOrders((prev) => [res.data, ...prev]);
+      if (editingId) {
+        // Update order
+        const res = await api.put<Order>(`/orders/orders/${editingId}`, {
+          ...form,
+          total,
+        });
+        setOrders((prev) =>
+          prev.map((o) => (o.id === editingId ? res.data : o))
+        );
+        toast.success("Order updated successfully");
+      } else {
+        // Create new order
+        const res = await api.post<Order>("/orders/orders", {
+          ...form,
+          total,
+        });
+        setOrders((prev) => [res.data, ...prev]);
+        toast.success("Order created successfully");
+      }
       setShowModal(false);
-      setUserId("");
-      setSelectedItems([]);
-    } catch (err) {
-      console.error(err);
-      alert("Failed to create order");
+      setForm({ user_id: "", items: [], driver_id: "", status: "pending" });
+      setEditingId(null);
+    } catch {
+      toast.error(editingId ? "Failed to update order" : "Failed to create order");
     } finally {
       setLoading(false);
     }
   };
 
-  // --------------------------
-  // Delete order
-  // --------------------------
-  const handleDeleteOrder = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this order?")) return;
+  const handleDelete = async (id: string) => {
+    if (!confirm("Delete this order?")) return;
     try {
       await api.delete(`/orders/orders/${id}`);
       setOrders((prev) => prev.filter((o) => o.id !== id));
-    } catch (err) {
-      console.error(err);
-      alert("Failed to delete order");
+      toast.success("Order deleted successfully");
+    } catch {
+      toast.error("Failed to delete order");
     }
   };
 
-  // --------------------------
-  // Render
-  // --------------------------
   return (
     <div className="p-6">
+      <ToastContainer position="top-right" />
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-3xl font-bold">🧾 Orders</h1>
-        <Button onClick={() => setShowModal(true)}>➕ Create Order</Button>
+        <Button
+          onClick={() => {
+            setEditingId(null);
+            setForm({ user_id: "", items: [], driver_id: "", status: "pending" });
+            setShowModal(true);
+          }}
+        >
+          ➕ Create Order
+        </Button>
       </div>
 
       {error && <p className="text-red-500 mb-4">Error: {error}</p>}
 
       <div className="grid gap-3">
         {orders.length ? (
-          orders.map((order) => {
-            const items = Array.isArray(order.items)
-              ? order.items
-              : (() => {
-                  try {
-                    const parsed = JSON.parse(order.items);
-                    return Array.isArray(parsed) ? parsed : [order.items];
-                  } catch {
-                    return [order.items];
-                  }
-                })();
-
-            return (
-              <div key={order.id} className="border rounded-lg p-4 bg-white shadow">
-                <p>
-                  <strong>User:</strong> {order.user_id}
-                </p>
-                <p>
-                  <strong>Items:</strong> {items.join(", ")}
-                </p>
-                <p>
-                  <strong>Total:</strong> ${order.total.toFixed(2)}
-                </p>
-                <p>
-                  <strong>Status:</strong>{" "}
-                  <span
-                    className={`font-semibold ${
-                      order.status === "pending"
-                        ? "text-yellow-600"
-                        : "text-green-600"
-                    }`}
-                  >
-                    {order.status}
-                  </span>
-                </p>
+          orders.map((order, i) => (
+            <div key={order.id || i} className="border rounded-lg p-4 bg-white shadow">
+              <p><strong>User:</strong> {order.user_id}</p>
+              <p><strong>Items:</strong> {order.items.join(", ")}</p>
+              <p><strong>Total:</strong> ${Number(order.total ?? 0).toFixed(2)}</p>
+              <p>
+                <strong>Status:</strong>{" "}
+                <span
+                  className={`font-semibold ${
+                    order.status === "pending"
+                      ? "text-yellow-600"
+                      : order.status === "paid"
+                      ? "text-blue-600"
+                      : order.status === "completed"
+                      ? "text-green-600"
+                      : "text-gray-500"
+                  }`}
+                >
+                  {order.status || "unknown"}
+                </span>
+              </p>
+              <p><strong>Driver:</strong> {order.driver_id || "Unassigned"}</p>
+              <div className="flex gap-2 mt-3">
                 <Button
-                  onClick={() => handleDeleteOrder(order.id)}
-                  className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 mt-3 rounded"
+                  onClick={() => handleEdit(order)}
+                  className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded"
+                >
+                  ✏️ Edit
+                </Button>
+                <Button
+                  onClick={() => handleDelete(order.id)}
+                  className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded"
                 >
                   🗑 Delete
                 </Button>
               </div>
-            );
-          })
+            </div>
+          ))
         ) : (
           <p>No orders found</p>
         )}
       </div>
 
-      {/* Modal */}
-      <Modal show={showModal} onClose={() => setShowModal(false)} title="Create New Order">
+      <Modal show={showModal} onClose={() => setShowModal(false)} title={editingId ? "Edit Order" : "Create New Order"}>
         <input
           type="text"
           placeholder="User ID"
-          value={userId}
-          onChange={(e) => setUserId(e.target.value)}
-          className="border p-2 w-full mb-4 rounded"
+          value={form.user_id}
+          onChange={(e) => setForm({ ...form, user_id: e.target.value })}
+          className="border p-2 w-full mb-3 rounded"
         />
-
-        <div className="grid grid-cols-2 gap-2 mb-4">
+        <div className="grid grid-cols-2 gap-2 mb-3">
           {MENU_ITEMS.map((item) => (
             <button
               key={item.name}
               onClick={() =>
-                setSelectedItems((prev) =>
-                  prev.includes(item.name)
-                    ? prev.filter((i) => i !== item.name)
-                    : [...prev, item.name]
-                )
+                setForm((prev) => ({
+                  ...prev,
+                  items: prev.items.includes(item.name)
+                    ? prev.items.filter((i) => i !== item.name)
+                    : [...prev.items, item.name],
+                }))
               }
               className={`border rounded p-2 text-sm ${
-                selectedItems.includes(item.name)
-                  ? "bg-green-500 text-white"
-                  : "bg-gray-100"
+                form.items.includes(item.name) ? "bg-green-500 text-white" : "bg-gray-100"
               }`}
             >
               {item.name} – ${item.price}
             </button>
           ))}
         </div>
-
-        <Button onClick={handleCreateOrder} loading={loading} className="w-full">
-          Create Order
+        <select
+          value={form.driver_id}
+          onChange={(e) => setForm({ ...form, driver_id: e.target.value })}
+          className="border p-2 w-full mb-3 rounded"
+        >
+          <option value="">Assign Driver (optional)</option>
+          {drivers.map((d) => (
+            <option key={d.id} value={d.id}>{d.name}</option>
+          ))}
+        </select>
+        <select
+          value={form.status}
+          onChange={(e) => setForm({ ...form, status: e.target.value as Order["status"] })}
+          className="border p-2 w-full mb-4 rounded"
+        >
+          <option value="pending">Pending</option>
+          <option value="paid">Paid</option>
+          <option value="completed">Completed</option>
+          <option value="delivered">Delivered</option>
+        </select>
+        <Button onClick={handleSubmit} loading={loading} className="w-full">
+          {editingId ? "Update Order" : "Create Order"}
         </Button>
       </Modal>
     </div>

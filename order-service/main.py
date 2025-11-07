@@ -4,9 +4,11 @@ import json
 from fastapi import FastAPI, HTTPException
 from database import database
 from models import orders, event_logs
-from schemas import OrderCreate, Order, AssignDriver, EventLog
+from schemas import OrderCreate, Order, AssignDriver, EventLog, OrderUpdate
 from events import publish_event
 from consumer import poll_messages
+from fastapi import HTTPException
+
 
 app = FastAPI(title="Order Service")
 
@@ -155,3 +157,36 @@ async def delete_order(order_id: str):
 
     await publish_event("order.deleted", {"id": order_id})
     return {"message": f"Order {order_id} deleted successfully"}
+
+
+@app.put("/orders/{order_id}", response_model=Order, tags=["Orders"])
+async def update_order(order_id: str, order: OrderUpdate):
+    query = orders.select().where(orders.c.id == order_id)
+    existing_order = await database.fetch_one(query)
+    if not existing_order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    update_data = {}
+
+    if order.items is not None:
+        update_data["items"] = json.dumps(order.items)
+    if order.total is not None:
+        update_data["total"] = order.total
+    if order.status is not None:
+        update_data["status"] = order.status
+    if order.driver_id is not None:
+        update_data["driver_id"] = order.driver_id
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    update_query = orders.update().where(orders.c.id == order_id).values(**update_data)
+    await database.execute(update_query)
+
+    # Merge updated fields with existing order
+    updated_order = {**dict(existing_order), **update_data}
+    updated_order["items"] = json.loads(updated_order["items"]) if isinstance(updated_order["items"], str) else updated_order["items"]
+
+    await publish_event("order.updated", {"id": order_id, **update_data})
+
+    return Order(**updated_order)
