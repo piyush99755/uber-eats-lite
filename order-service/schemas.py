@@ -12,12 +12,14 @@ class Order(OrderCreate):
     id: str
     status: str
     driver_id: Optional[str] = None
+    payment_status: Optional[str] = "pending"  
 
 class OrderUpdate(BaseModel):
     items: Optional[List[str]] = None
     total: Optional[float] = None
     status: Optional[str] = None
     driver_id: Optional[str] = None
+    payment_status: Optional[str] = None 
 
 class AssignDriver(BaseModel):
     driver_id: str

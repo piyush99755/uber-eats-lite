@@ -13,6 +13,7 @@ orders = Table(
     Column("items", String, nullable=False),
     Column("total", Float, nullable=False),
     Column("status", String, default="pending"),
+    Column("payment_status", String, default="pending"),
     Column("driver_id", String, nullable=True)
 )
 

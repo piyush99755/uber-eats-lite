@@ -5,13 +5,25 @@ import { Modal } from "../components/Modal";
 import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 
+export type OrderStatus = "pending" | "paid" | "assigned" | "delivered";
+
 interface Order {
   id: string;
   user_id: string;
   items: string[];
-  total?: number;
-  status?: "pending" | "paid" | "completed" | "delivered";
+  total: number;
+  status: OrderStatus;
   driver_id?: string;
+}
+
+interface Driver {
+  id: string;
+  name: string;
+}
+
+interface EventLog {
+  event_type: string;
+  payload: any;
 }
 
 const MENU_ITEMS = [
@@ -24,34 +36,32 @@ const MENU_ITEMS = [
 
 export default function Orders() {
   const [orders, setOrders] = useState<Order[]>([]);
-  const [drivers, setDrivers] = useState<{ id: string; name: string }[]>([]);
-  const [error, setError] = useState("");
+  const [drivers, setDrivers] = useState<Driver[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [loading, setLoading] = useState(false);
-
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({
     user_id: "",
     items: [] as string[],
     driver_id: "",
-    status: "pending" as Order["status"],
+    status: "pending" as OrderStatus,
   });
 
-  const [editingId, setEditingId] = useState<string | null>(null);
-
-  // --- Fetch orders and drivers ---
+  // --- Fetch orders ---
   const fetchOrders = async () => {
     try {
-      const res = await api.get<Order[]>("/orders/orders");
+      const res = await api.get<Order[]>("/orders/orders"); // API Gateway path
       setOrders([...res.data].reverse());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch orders");
-      toast.error("Failed to fetch orders");
+    } catch (err: unknown) {
+      if (err instanceof Error) toast.error(err.message);
+      else toast.error("Failed to fetch orders");
     }
   };
 
+  // --- Fetch drivers ---
   const fetchDrivers = async () => {
     try {
-      const res = await api.get<{ id: string; name: string }[]>("/drivers/drivers");
+      const res = await api.get<Driver[]>("/drivers/drivers"); // API Gateway path
       setDrivers(res.data);
     } catch {
       toast.error("Failed to fetch drivers");
@@ -63,19 +73,69 @@ export default function Orders() {
     fetchDrivers();
   }, []);
 
-  // --- Open modal for editing ---
+  // --- Event polling ---
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await api.get<EventLog[]>("/orders/events?limit=20");
+        res.data.forEach((ev) => {
+          const { event_type, payload } = ev;
+          if (!payload?.order_id) return;
+
+          setOrders((prev) =>
+            prev.map((order) => {
+              if (order.id !== payload.order_id) return order;
+              switch (event_type) {
+                case "payment.processed":
+                  toast.success(`Payment received for order ${order.id}`);
+                  return { ...order, status: "paid" };
+                case "driver.assigned":
+                  toast.info(`Driver assigned for order ${order.id}`);
+                  return { ...order, status: "assigned", driver_id: payload.driver_id };
+                case "order.delivered":
+                  toast.success(`Order ${order.id} delivered`);
+                  return { ...order, status: "delivered" };
+                default:
+                  return order;
+              }
+            })
+          );
+        });
+      } catch (err) {
+        console.error("Event polling error", err);
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // --- Edit order ---
   const handleEdit = (order: Order) => {
     setForm({
       user_id: order.user_id,
       items: order.items,
-      driver_id: order.driver_id || "",
-      status: order.status || "pending",
+      driver_id: order.driver_id ?? "",
+      status: order.status,
     });
     setEditingId(order.id);
     setShowModal(true);
   };
 
-  // --- Create or update order ---
+  // --- Pay Now ---
+  const handlePayment = async (order: Order) => {
+    try {
+      await api.post("/payments/pay", {
+        order_id: order.id,
+        user_id: order.user_id,
+        amount: order.total,
+      });
+      toast.success(`Payment initiated for order ${order.id}`);
+    } catch {
+      toast.error(`Payment failed for order ${order.id}`);
+    }
+  };
+
+  // --- Create / Update order ---
   const handleSubmit = async () => {
     if (!form.user_id || form.items.length === 0) {
       toast.error("Please provide user ID and select items");
@@ -83,12 +143,13 @@ export default function Orders() {
     }
 
     setLoading(true);
-    const total = MENU_ITEMS.filter((i) => form.items.includes(i.name))
-      .reduce((sum, i) => sum + i.price, 0);
+    const total = MENU_ITEMS.filter((i) => form.items.includes(i.name)).reduce(
+      (sum, i) => sum + i.price,
+      0
+    );
 
     try {
       if (editingId) {
-        // Update order
         const res = await api.put<Order>(`/orders/orders/${editingId}`, {
           ...form,
           total,
@@ -98,7 +159,6 @@ export default function Orders() {
         );
         toast.success("Order updated successfully");
       } else {
-        // Create new order
         const res = await api.post<Order>("/orders/orders", {
           ...form,
           total,
@@ -143,15 +203,15 @@ export default function Orders() {
         </Button>
       </div>
 
-      {error && <p className="text-red-500 mb-4">Error: {error}</p>}
-
       <div className="grid gap-3">
-        {orders.length ? (
-          orders.map((order, i) => (
-            <div key={order.id || i} className="border rounded-lg p-4 bg-white shadow">
+        {orders.length === 0 ? (
+          <p>No orders found</p>
+        ) : (
+          orders.map((order) => (
+            <div key={order.id} className="border rounded-lg p-4 bg-white shadow">
               <p><strong>User:</strong> {order.user_id}</p>
               <p><strong>Items:</strong> {order.items.join(", ")}</p>
-              <p><strong>Total:</strong> ${Number(order.total ?? 0).toFixed(2)}</p>
+              <p><strong>Total:</strong> ${order.total.toFixed(2)}</p>
               <p>
                 <strong>Status:</strong>{" "}
                 <span
@@ -160,37 +220,37 @@ export default function Orders() {
                       ? "text-yellow-600"
                       : order.status === "paid"
                       ? "text-blue-600"
-                      : order.status === "completed"
-                      ? "text-green-600"
-                      : "text-gray-500"
+                      : order.status === "assigned"
+                      ? "text-purple-600"
+                      : "text-green-600"
                   }`}
                 >
-                  {order.status || "unknown"}
+                  {order.status}
                 </span>
               </p>
-              <p><strong>Driver:</strong> {order.driver_id || "Unassigned"}</p>
+              <p><strong>Driver:</strong> {order.driver_id ?? "Unassigned"}</p>
               <div className="flex gap-2 mt-3">
                 <Button
                   onClick={() => handleEdit(order)}
-                  className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded"
+                  disabled={["paid", "assigned", "delivered"].includes(order.status)}
                 >
                   ✏️ Edit
                 </Button>
-                <Button
-                  onClick={() => handleDelete(order.id)}
-                  className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded"
-                >
-                  🗑 Delete
-                </Button>
+                {order.status === "pending" && (
+                  <Button onClick={() => handlePayment(order)}>💳 Pay Now</Button>
+                )}
+                <Button onClick={() => handleDelete(order.id)}>🗑 Delete</Button>
               </div>
             </div>
           ))
-        ) : (
-          <p>No orders found</p>
         )}
       </div>
 
-      <Modal show={showModal} onClose={() => setShowModal(false)} title={editingId ? "Edit Order" : "Create New Order"}>
+      <Modal
+        show={showModal}
+        onClose={() => setShowModal(false)}
+        title={editingId ? "Edit Order" : "Create New Order"}
+      >
         <input
           type="text"
           placeholder="User ID"
@@ -225,18 +285,10 @@ export default function Orders() {
         >
           <option value="">Assign Driver (optional)</option>
           {drivers.map((d) => (
-            <option key={d.id} value={d.id}>{d.name}</option>
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
           ))}
-        </select>
-        <select
-          value={form.status}
-          onChange={(e) => setForm({ ...form, status: e.target.value as Order["status"] })}
-          className="border p-2 w-full mb-4 rounded"
-        >
-          <option value="pending">Pending</option>
-          <option value="paid">Paid</option>
-          <option value="completed">Completed</option>
-          <option value="delivered">Delivered</option>
         </select>
         <Button onClick={handleSubmit} loading={loading} className="w-full">
           {editingId ? "Update Order" : "Create Order"}

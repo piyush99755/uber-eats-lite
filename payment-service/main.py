@@ -137,6 +137,13 @@ async def health_check():
 def root():
     return {"service": "payment-service", "status": "running"}
 
+@app.get("/payments/{user_id}")
+async def get_user_payments(user_id: str):
+    query = payments.select().where(payments.c.user_id == user_id)
+    results = await database.fetch_all(query)
+    return [dict(row) for row in results]
+
+
 # ─── Startup / Shutdown ─────────────────────────────────────────
 @app.on_event("startup")
 async def startup():

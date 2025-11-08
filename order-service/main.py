@@ -50,6 +50,7 @@ async def create_order(order: OrderCreate):
         items=json.dumps(order.items),
         total=order.total,
         status="pending",
+        payment_status="pending",
         driver_id=None
     )
     await database.execute(query)
@@ -60,10 +61,11 @@ async def create_order(order: OrderCreate):
         "user_id": order.user_id,
         "items": order.items,
         "total": order.total,
-        "status": "pending"
+        "status": "pending",
+        "payment_status": "pending"
     })
 
-    return Order(id=order_id, status="pending", **order.dict())
+    return Order(id=order_id, status="pending", payment_status="pending", **order.dict())
 
 
 # LIST ORDERS
