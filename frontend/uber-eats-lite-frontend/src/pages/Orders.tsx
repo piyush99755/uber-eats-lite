@@ -4,6 +4,7 @@ import { Button } from "../components/Button";
 import { Modal } from "../components/Modal";
 import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
+import { PaymentModal } from "../components/PaymentModal";
 
 export type OrderStatus = "pending" | "paid" | "assigned" | "delivered";
 
@@ -38,6 +39,8 @@ export default function Orders() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [showModal, setShowModal] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({
@@ -47,10 +50,10 @@ export default function Orders() {
     status: "pending" as OrderStatus,
   });
 
-  // --- Fetch orders ---
+  // Fetch orders
   const fetchOrders = async () => {
     try {
-      const res = await api.get<Order[]>("/orders/orders"); // API Gateway path
+      const res = await api.get<Order[]>("/orders/orders");
       setOrders([...res.data].reverse());
     } catch (err: unknown) {
       if (err instanceof Error) toast.error(err.message);
@@ -58,10 +61,10 @@ export default function Orders() {
     }
   };
 
-  // --- Fetch drivers ---
+  // Fetch drivers
   const fetchDrivers = async () => {
     try {
-      const res = await api.get<Driver[]>("/drivers/drivers"); // API Gateway path
+      const res = await api.get<Driver[]>("/drivers/drivers");
       setDrivers(res.data);
     } catch {
       toast.error("Failed to fetch drivers");
@@ -73,7 +76,7 @@ export default function Orders() {
     fetchDrivers();
   }, []);
 
-  // --- Event polling ---
+  // Poll recent events
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
@@ -87,13 +90,18 @@ export default function Orders() {
               if (order.id !== payload.order_id) return order;
               switch (event_type) {
                 case "payment.processed":
-                  toast.success(`Payment received for order ${order.id}`);
+                case "payment.completed":
+                  toast.success(`💰 Payment completed for order ${order.id}`);
                   return { ...order, status: "paid" };
                 case "driver.assigned":
-                  toast.info(`Driver assigned for order ${order.id}`);
-                  return { ...order, status: "assigned", driver_id: payload.driver_id };
+                  toast.info(`🚗 Driver assigned for order ${order.id}`);
+                  return {
+                    ...order,
+                    status: "assigned",
+                    driver_id: payload.driver_id,
+                  };
                 case "order.delivered":
-                  toast.success(`Order ${order.id} delivered`);
+                  toast.success(`✅ Order ${order.id} delivered`);
                   return { ...order, status: "delivered" };
                 default:
                   return order;
@@ -109,7 +117,7 @@ export default function Orders() {
     return () => clearInterval(interval);
   }, []);
 
-  // --- Edit order ---
+  // Edit order
   const handleEdit = (order: Order) => {
     setForm({
       user_id: order.user_id,
@@ -121,21 +129,13 @@ export default function Orders() {
     setShowModal(true);
   };
 
-  // --- Pay Now ---
-  const handlePayment = async (order: Order) => {
-    try {
-      await api.post("/payments/pay", {
-        order_id: order.id,
-        user_id: order.user_id,
-        amount: order.total,
-      });
-      toast.success(`Payment initiated for order ${order.id}`);
-    } catch {
-      toast.error(`Payment failed for order ${order.id}`);
-    }
+  // Open Stripe payment modal
+  const handlePayment = (order: Order) => {
+    setSelectedOrder(order);
+    setShowPaymentModal(true);
   };
 
-  // --- Create / Update order ---
+  // Create / update order
   const handleSubmit = async () => {
     if (!form.user_id || form.items.length === 0) {
       toast.error("Please provide user ID and select items");
@@ -165,6 +165,12 @@ export default function Orders() {
         });
         setOrders((prev) => [res.data, ...prev]);
         toast.success("Order created successfully");
+
+        // Automatically open Stripe payment modal for new order
+        setTimeout(() => {
+          setSelectedOrder(res.data);
+          setShowPaymentModal(true);
+        }, 400);
       }
       setShowModal(false);
       setForm({ user_id: "", items: [], driver_id: "", status: "pending" });
@@ -209,9 +215,15 @@ export default function Orders() {
         ) : (
           orders.map((order) => (
             <div key={order.id} className="border rounded-lg p-4 bg-white shadow">
-              <p><strong>User:</strong> {order.user_id}</p>
-              <p><strong>Items:</strong> {order.items.join(", ")}</p>
-              <p><strong>Total:</strong> ${order.total.toFixed(2)}</p>
+              <p>
+                <strong>User:</strong> {order.user_id}
+              </p>
+              <p>
+                <strong>Items:</strong> {order.items.join(", ")}
+              </p>
+              <p>
+                <strong>Total:</strong> ${order.total.toFixed(2)}
+              </p>
               <p>
                 <strong>Status:</strong>{" "}
                 <span
@@ -228,24 +240,32 @@ export default function Orders() {
                   {order.status}
                 </span>
               </p>
-              <p><strong>Driver:</strong> {order.driver_id ?? "Unassigned"}</p>
+              <p>
+                <strong>Driver:</strong> {order.driver_id ?? "Unassigned"}
+              </p>
+
               <div className="flex gap-2 mt-3">
                 <Button
                   onClick={() => handleEdit(order)}
-                  disabled={["paid", "assigned", "delivered"].includes(order.status)}
+                  disabled={["assigned", "delivered"].includes(order.status)}
                 >
                   ✏️ Edit
                 </Button>
+
                 {order.status === "pending" && (
                   <Button onClick={() => handlePayment(order)}>💳 Pay Now</Button>
                 )}
-                <Button onClick={() => handleDelete(order.id)}>🗑 Delete</Button>
+
+                <Button variant="danger" onClick={() => handleDelete(order.id)}>
+                  🗑 Delete
+                </Button>
               </div>
             </div>
           ))
         )}
       </div>
 
+      {/* Create/Edit Order Modal */}
       <Modal
         show={showModal}
         onClose={() => setShowModal(false)}
@@ -258,6 +278,7 @@ export default function Orders() {
           onChange={(e) => setForm({ ...form, user_id: e.target.value })}
           className="border p-2 w-full mb-3 rounded"
         />
+
         <div className="grid grid-cols-2 gap-2 mb-3">
           {MENU_ITEMS.map((item) => (
             <button
@@ -271,29 +292,30 @@ export default function Orders() {
                 }))
               }
               className={`border rounded p-2 text-sm ${
-                form.items.includes(item.name) ? "bg-green-500 text-white" : "bg-gray-100"
+                form.items.includes(item.name)
+                  ? "bg-green-500 text-white"
+                  : "bg-gray-100"
               }`}
             >
               {item.name} – ${item.price}
             </button>
           ))}
         </div>
-        <select
-          value={form.driver_id}
-          onChange={(e) => setForm({ ...form, driver_id: e.target.value })}
-          className="border p-2 w-full mb-3 rounded"
-        >
-          <option value="">Assign Driver (optional)</option>
-          {drivers.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name}
-            </option>
-          ))}
-        </select>
+
         <Button onClick={handleSubmit} loading={loading} className="w-full">
           {editingId ? "Update Order" : "Create Order"}
         </Button>
       </Modal>
+
+      {/* Stripe Payment Modal */}
+      {selectedOrder && (
+        <PaymentModal
+          show={showPaymentModal}
+          onClose={() => setShowPaymentModal(false)}
+          orderId={selectedOrder.id}
+          amount={selectedOrder.total}
+        />
+      )}
     </div>
   );
 }
