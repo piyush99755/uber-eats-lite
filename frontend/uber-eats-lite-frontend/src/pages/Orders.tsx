@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+// src/pages/Orders.tsx
+import { useEffect, useState, useMemo } from "react";
 import api from "../api/api";
 import { Button } from "../components/Button";
 import { Modal } from "../components/Modal";
@@ -11,15 +12,11 @@ export type OrderStatus = "pending" | "paid" | "assigned" | "delivered";
 interface Order {
   id: string;
   user_id: string;
+  user_name?: string; // for display
   items: string[];
   total: number;
   status: OrderStatus;
-  driver_id?: string;
-}
-
-interface Driver {
-  id: string;
-  name: string;
+  driver_id?: string | null;
 }
 
 interface EventLog {
@@ -35,9 +32,18 @@ const MENU_ITEMS = [
   { name: "Salad", price: 6 },
 ];
 
+function getTokenPayload() {
+  const t = localStorage.getItem("token");
+  if (!t) return null;
+  try {
+    return JSON.parse(atob(t.split(".")[1]));
+  } catch {
+    return null;
+  }
+}
+
 export default function Orders() {
   const [orders, setOrders] = useState<Order[]>([]);
-  const [drivers, setDrivers] = useState<Driver[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -50,67 +56,75 @@ export default function Orders() {
     status: "pending" as OrderStatus,
   });
 
-  // Fetch orders
-  const fetchOrders = async () => {
-    try {
-      const res = await api.get<Order[]>("/orders/orders");
-      setOrders([...res.data].reverse());
-    } catch (err: unknown) {
-      if (err instanceof Error) toast.error(err.message);
-      else toast.error("Failed to fetch orders");
-    }
-  };
+  // current user info
+  const tokenPayload = useMemo(() => getTokenPayload(), []);
+  const currentUserId = tokenPayload?.sub ?? null;
+  const currentUserRole = tokenPayload?.role ?? null;
+  const isAdmin = currentUserRole === "admin";
 
-  // Fetch drivers
-  const fetchDrivers = async () => {
-    try {
-      const res = await api.get<Driver[]>("/drivers/drivers");
-      setDrivers(res.data);
-    } catch {
-      toast.error("Failed to fetch drivers");
-    }
-  };
-
+  // Fetch orders (skip fetching users)
   useEffect(() => {
-    fetchOrders();
-    fetchDrivers();
-  }, []);
+    const fetchOrders = async () => {
+      try {
+        const res = await api.get<Order[]>("/orders/orders");
+        let fetched = Array.isArray(res.data) ? res.data : [];
 
-  // Poll recent events
+        if (!isAdmin && currentUserId) {
+          fetched = fetched.filter((o) => o.user_id === currentUserId);
+        }
+
+        // temporary user_name for testing
+        fetched = fetched.map((o) => ({ ...o, user_name: currentUserId ? "You" : o.user_id }));
+
+        setOrders([...fetched].reverse());
+      } catch (err) {
+        console.error("Failed to fetch orders:", err);
+        toast.error("Failed to fetch orders");
+        setOrders([]);
+      }
+    };
+
+    fetchOrders();
+  }, [currentUserId, isAdmin]);
+
+  // Poll recent events for live updates
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
         const res = await api.get<EventLog[]>("/orders/events?limit=20");
-        res.data.forEach((ev) => {
-          const { event_type, payload } = ev;
-          if (!payload?.order_id) return;
+        const events = Array.isArray(res.data) ? res.data : [];
+        if (!events.length) return;
 
-          setOrders((prev) =>
-            prev.map((order) => {
-              if (order.id !== payload.order_id) return order;
-              switch (event_type) {
-                case "payment.processed":
-                case "payment.completed":
-                  toast.success(`💰 Payment completed for order ${order.id}`);
-                  return { ...order, status: "paid" };
-                case "driver.assigned":
-                  toast.info(`🚗 Driver assigned for order ${order.id}`);
-                  return {
-                    ...order,
-                    status: "assigned",
-                    driver_id: payload.driver_id,
-                  };
-                case "order.delivered":
-                  toast.success(`✅ Order ${order.id} delivered`);
-                  return { ...order, status: "delivered" };
-                default:
-                  return order;
-              }
-            })
-          );
+        setOrders((prev) => {
+          let updated = [...prev];
+          events.forEach((ev) => {
+            const { event_type, payload } = ev;
+            const orderIndex = updated.findIndex((o) => o.id === payload?.order_id);
+            if (orderIndex === -1) return;
+
+            const order = updated[orderIndex];
+            switch (event_type) {
+              case "payment.processed":
+              case "payment.completed":
+                toast.success(`💰 Payment completed for order ${order.id}`);
+                updated[orderIndex] = { ...order, status: "paid", driver_id: order.driver_id ?? "Unassigned" };
+                break;
+              case "driver.assigned":
+                toast.info(`🚗 Driver assigned for order ${order.id}`);
+                updated[orderIndex] = { ...order, status: "assigned", driver_id: payload.driver_id ?? "Unassigned" };
+                break;
+              case "order.delivered":
+                toast.success(`✅ Order ${order.id} delivered`);
+                updated[orderIndex] = { ...order, status: "delivered" };
+                break;
+              default:
+                break;
+            }
+          });
+          return updated;
         });
       } catch (err) {
-        console.error("Event polling error", err);
+        console.debug("Event polling error (non-fatal):", err);
       }
     }, 3000);
 
@@ -119,6 +133,10 @@ export default function Orders() {
 
   // Edit order
   const handleEdit = (order: Order) => {
+    if (!isAdmin && currentUserId !== order.user_id) {
+      toast.error("You can only edit your own orders");
+      return;
+    }
     setForm({
       user_id: order.user_id,
       items: order.items,
@@ -129,66 +147,70 @@ export default function Orders() {
     setShowModal(true);
   };
 
-  // Open Stripe payment modal
   const handlePayment = (order: Order) => {
+    if (!isAdmin && currentUserId !== order.user_id) {
+      toast.error("You can only pay for your own orders");
+      return;
+    }
     setSelectedOrder(order);
     setShowPaymentModal(true);
   };
 
-  // Create / update order
   const handleSubmit = async () => {
     if (!form.user_id || form.items.length === 0) {
       toast.error("Please provide user ID and select items");
       return;
     }
+    if (!isAdmin && currentUserId && form.user_id !== currentUserId) {
+      toast.error("You can only create orders for yourself");
+      return;
+    }
 
     setLoading(true);
-    const total = MENU_ITEMS.filter((i) => form.items.includes(i.name)).reduce(
-      (sum, i) => sum + i.price,
-      0
-    );
+    const total = MENU_ITEMS.filter((i) => form.items.includes(i.name)).reduce((sum, i) => sum + i.price, 0);
 
     try {
       if (editingId) {
-        const res = await api.put<Order>(`/orders/orders/${editingId}`, {
-          ...form,
-          total,
-        });
-        setOrders((prev) =>
-          prev.map((o) => (o.id === editingId ? res.data : o))
-        );
+        const res = await api.put<Order>(`/orders/orders/${editingId}`, { ...form, total });
+        setOrders((prev) => prev.map((o) => (o.id === editingId ? res.data : o)));
         toast.success("Order updated successfully");
       } else {
-        const res = await api.post<Order>("/orders/orders", {
-          ...form,
-          total,
-        });
-        setOrders((prev) => [res.data, ...prev]);
+        const payload = { ...form, total, user_id: form.user_id || currentUserId || "" };
+        const res = await api.post<Order>("/orders/orders", payload);
+        const created = res.data;
+        if (isAdmin || created.user_id === currentUserId) {
+          setOrders((prev) => [created, ...prev]);
+        }
         toast.success("Order created successfully");
 
-        // Automatically open Stripe payment modal for new order
         setTimeout(() => {
-          setSelectedOrder(res.data);
+          setSelectedOrder(created);
           setShowPaymentModal(true);
         }, 400);
       }
       setShowModal(false);
-      setForm({ user_id: "", items: [], driver_id: "", status: "pending" });
+      setForm({ user_id: currentUserId ?? "", items: [], driver_id: "", status: "pending" });
       setEditingId(null);
-    } catch {
+    } catch (err) {
+      console.error("Create/update error:", err);
       toast.error(editingId ? "Failed to update order" : "Failed to create order");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (id: string, ownerId?: string) => {
+    if (!isAdmin && ownerId !== currentUserId) {
+      toast.error("You can only delete your own orders");
+      return;
+    }
     if (!confirm("Delete this order?")) return;
     try {
       await api.delete(`/orders/orders/${id}`);
       setOrders((prev) => prev.filter((o) => o.id !== id));
       toast.success("Order deleted successfully");
-    } catch {
+    } catch (err) {
+      console.error("Delete error:", err);
       toast.error("Failed to delete order");
     }
   };
@@ -201,7 +223,7 @@ export default function Orders() {
         <Button
           onClick={() => {
             setEditingId(null);
-            setForm({ user_id: "", items: [], driver_id: "", status: "pending" });
+            setForm({ user_id: currentUserId ?? "", items: [], driver_id: "", status: "pending" });
             setShowModal(true);
           }}
         >
@@ -216,7 +238,7 @@ export default function Orders() {
           orders.map((order) => (
             <div key={order.id} className="border rounded-lg p-4 bg-white shadow">
               <p>
-                <strong>User:</strong> {order.user_id}
+                <strong>User:</strong> {order.user_name || order.user_id}
               </p>
               <p>
                 <strong>Items:</strong> {order.items.join(", ")}
@@ -256,7 +278,7 @@ export default function Orders() {
                   <Button onClick={() => handlePayment(order)}>💳 Pay Now</Button>
                 )}
 
-                <Button variant="danger" onClick={() => handleDelete(order.id)}>
+                <Button variant="danger" onClick={() => handleDelete(order.id, order.user_id)}>
                   🗑 Delete
                 </Button>
               </div>
@@ -266,17 +288,14 @@ export default function Orders() {
       </div>
 
       {/* Create/Edit Order Modal */}
-      <Modal
-        show={showModal}
-        onClose={() => setShowModal(false)}
-        title={editingId ? "Edit Order" : "Create New Order"}
-      >
+      <Modal show={showModal} onClose={() => setShowModal(false)} title={editingId ? "Edit Order" : "Create New Order"}>
         <input
           type="text"
           placeholder="User ID"
           value={form.user_id}
           onChange={(e) => setForm({ ...form, user_id: e.target.value })}
           className="border p-2 w-full mb-3 rounded"
+          disabled={!isAdmin}
         />
 
         <div className="grid grid-cols-2 gap-2 mb-3">
@@ -292,9 +311,7 @@ export default function Orders() {
                 }))
               }
               className={`border rounded p-2 text-sm ${
-                form.items.includes(item.name)
-                  ? "bg-green-500 text-white"
-                  : "bg-gray-100"
+                form.items.includes(item.name) ? "bg-green-500 text-white" : "bg-gray-100"
               }`}
             >
               {item.name} – ${item.price}

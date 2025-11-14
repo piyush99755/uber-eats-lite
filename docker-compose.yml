@@ -43,6 +43,7 @@ services:
       - order-service
       - payment-service
       - notification-service
+      - auth-service
     networks:
       - uber-eats-lite-network
 
@@ -125,7 +126,7 @@ services:
     build: ./notification-service
     container_name: notification-service
     ports:
-      - "8003:8000"        # ← Added
+      - "8003:8000"        
     env_file:
       - ./notification-service/.env
     environment:
@@ -136,6 +137,20 @@ services:
     networks:
       - uber-eats-lite-network
 
+  auth-service:
+    build: ./auth-service
+    container_name: auth-service
+    ports:
+      - "8005:8005"
+    env_file:
+      - ./auth-service/.env
+    depends_on:
+      - user-service
+      - postgres 
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://uber:eats@postgres:5432/uber_eats_db
+    networks:
+      - uber-eats-lite-network
 
 # --------------------
 # Networks & Volumes

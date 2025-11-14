@@ -1,29 +1,30 @@
-# payment-service/events.py
+# --- payment-service/events.py ---
 import os
 import json
 import aioboto3
 from datetime import datetime
 from dotenv import load_dotenv
+import httpx
 
 load_dotenv()
 
 USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# Queue URLs
+# Queue URLs (AWS mode)
 NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
 ORDER_SERVICE_QUEUE = os.getenv("ORDER_SERVICE_QUEUE")
 PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL")
+
+# For local mode (direct HTTP)
+ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order-service:8000")
 
 session = aioboto3.Session()
 
 
 async def publish_event(event_type: str, payload: dict):
     """
-    Publish event to SQS:
-      - payment.* → send to ORDER_SERVICE_QUEUE (so order-service updates status)
-      - notify.* or others → send to NOTIFICATION_QUEUE_URL
-      - fallback → PAYMENT_QUEUE_URL
+    Publish an event either via AWS SQS or directly via HTTP (local dev).
     """
 
     message = {
@@ -33,20 +34,29 @@ async def publish_event(event_type: str, payload: dict):
         "timestamp": datetime.utcnow().isoformat(),
     }
 
+    # ─── Local Mode ─────────────────────────────────────────────
     if not USE_AWS:
-        print(f"[LOCAL EVENT] {event_type}: {payload}")
+        if event_type.startswith("payment."):
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post(f"{ORDER_SERVICE_URL}/payments/webhook", json=message)
+                print(f"[LOCAL EVENT] Sent {event_type} → {ORDER_SERVICE_URL}/payments/webhook")
+            except Exception as e:
+                print(f"[LOCAL EVENT ERROR] Could not send {event_type}: {e}")
+        else:
+            print(f"[LOCAL EVENT] {event_type}: {payload}")
         return
 
-    # pick destination queue
+    # ─── AWS SQS Mode ───────────────────────────────────────────
     if event_type.startswith("payment."):
-        target_queue = ORDER_SERVICE_QUEUE
+        target_queue = PAYMENT_QUEUE_URL
     elif event_type.startswith("notify."):
         target_queue = NOTIFICATION_QUEUE_URL
     else:
-        target_queue = PAYMENT_QUEUE_URL or ORDER_SERVICE_QUEUE
+        target_queue = ORDER_SERVICE_QUEUE
 
     if not target_queue:
-        print(f"[WARN] No target queue for {event_type}")
+        print(f"[WARN] No target queue configured for event {event_type}")
         return
 
     try:

@@ -22,3 +22,5 @@ aioboto3
 botocore
 asyncpg
 psycopg2-binary
+prometheus_client
+

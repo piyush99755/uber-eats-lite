@@ -15,6 +15,7 @@ psycopg2-binary
 
 # Utilities
 python-dotenv==1.0.1
+python-jose[cryptography]
 pydantic==2.11.9
 pydantic_core==2.33.2
 typing_extensions==4.15.0

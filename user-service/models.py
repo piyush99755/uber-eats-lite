@@ -8,6 +8,7 @@ users = Table(
     Column("id", String, primary_key=True),
     Column("name", String, nullable=False),
     Column("email", String, nullable=False, unique=True),
+    Column("role", String, nullable=False),  
 )
 
 processed_events = Table(

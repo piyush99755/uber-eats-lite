@@ -1,146 +1,81 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import Home from "./pages/Home";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import Dashboard from "./pages/Dashboard";
 import Orders from "./pages/Orders";
 import Users from "./pages/Users";
 import Drivers from "./pages/Drivers";
-import Notifications from "./pages/Notifications";
 import Payments from "./pages/Payments";
 import Events from "./pages/Events";
-import api from "./api/api";
+import Login from "./components/Login";
+import Signup from "./components/Signup";
 import Sidebar from "./components/Sidebar";
+import api from "./api/api";
 
-// --- Health Panel ---
-interface ServiceHealth {
-  name: string;
-  endpoint: string;
-  status: "healthy" | "down";
-}
-
-function HealthPanel() {
-  const [services, setServices] = useState<ServiceHealth[]>([]);
+export default function App() {
+  const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
+  const [role, setRole] = useState<string | null>(null);
 
   useEffect(() => {
-    const checkHealth = async () => {
-      const endpoints = [
-        { name: "API Gateway", endpoint: "/health" },
-        { name: "User Service", endpoint: "/users/health" },
-        { name: "Order Service", endpoint: "/orders/health" },
-        { name: "Driver Service", endpoint: "/drivers/health" },
-        { name: "Payment Service", endpoint: "/payments/health" },
-        { name: "Notification Service", endpoint: "/notifications/health" },
-      ];
+    if (token) {
+      try {
+        const payload = JSON.parse(atob(token.split(".")[1]));
+        setRole(payload.role);
+        api.defaults.headers.common["Authorization"] = `Bearer ${token}`;
+      } catch {
+        setToken(null);
+        setRole(null);
+        localStorage.removeItem("token");
+      }
+    }
+  }, [token]);
 
-      const results: ServiceHealth[] = await Promise.all(
-        endpoints.map(async (svc) => {
-          try {
-            await api.get(svc.endpoint);
-            return { ...svc, status: "healthy" as const };
-          } catch {
-            return { ...svc, status: "down" as const };
-          }
-        })
-      );
+  const handleLogin = (newToken: string) => {
+    setToken(newToken);
+    localStorage.setItem("token", newToken);
+  };
 
-      setServices(results);
-    };
+  const handleLogout = () => {
+    setToken(null);
+    setRole(null);
+    localStorage.removeItem("token");
+  };
 
-    checkHealth();
-    const interval = setInterval(checkHealth, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">
-      {services.map((svc) => (
-        <div
-          key={svc.name}
-          className="border rounded-xl p-4 bg-white shadow flex items-center justify-between"
-        >
-          <span className="font-semibold">{svc.name}</span>
-          <span
-            className={`text-sm font-bold px-3 py-1 rounded-full ${
-              svc.status === "healthy"
-                ? "bg-green-100 text-green-700"
-                : "bg-red-100 text-red-700"
-            }`}
-          >
-            {svc.status === "healthy" ? "🟢 Healthy" : "🔴 Down"}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// --- App Layout with Animated Sidebar ---
-function AppLayout() {
-  const [open, setOpen] = useState(false);
-
-  return (
-    <div className="flex flex-col md:flex-row min-h-screen bg-gray-50 relative overflow-hidden">
-      {/* Mobile Header */}
-      <div className="md:hidden flex justify-between items-center p-4 bg-gray-900 text-white">
-        <h1 className="text-lg font-bold">Uber Eats Lite</h1>
-        <button
-          onClick={() => setOpen(!open)}
-          className="text-2xl focus:outline-none"
-        >
-          ☰
-        </button>
-      </div>
-
-      {/* Animated Sidebar for mobile */}
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            initial={{ x: "-100%" }}
-            animate={{ x: 0 }}
-            exit={{ x: "-100%" }}
-            transition={{ type: "tween", duration: 0.3 }}
-            className="fixed inset-y-0 left-0 w-64 bg-gray-900 z-50 shadow-lg md:hidden"
-          >
-            <Sidebar onNavigate={() => setOpen(false)} />
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Desktop Sidebar (always visible) */}
-      <div className="hidden md:block">
-        <Sidebar />
-      </div>
-
-      {/* Main Content */}
-      <main className="flex-1 p-6 overflow-auto z-10">
-        <HealthPanel />
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/orders" element={<Orders />} />
-          <Route path="/users" element={<Users />} />
-          <Route path="/drivers" element={<Drivers />} />
-          <Route path="/notifications" element={<Notifications />} />
-          <Route path="/payments" element={<Payments />} />
-          <Route path="/events" element={<Events />} />
-        </Routes>
-      </main>
-
-      {/* Mobile overlay background */}
-      {open && (
-        <div
-          className="fixed inset-0 bg-black bg-opacity-40 md:hidden"
-          onClick={() => setOpen(false)}
-        />
-      )}
-    </div>
-  );
-}
-
-// --- Root App ---
-export default function App() {
   return (
     <BrowserRouter>
-      <AppLayout />
+      {!token ? (
+        <div className="min-h-screen flex flex-col items-center justify-center">
+          <h1 className="text-3xl font-bold mb-6">🍔 Uber Eats Lite</h1>
+          <div className="flex gap-4">
+            <Login onLogin={handleLogin} />
+            <Signup />
+          </div>
+        </div>
+      ) : (
+        <div className="flex min-h-screen bg-gray-50">
+          <Sidebar role={role} onLogout={handleLogout} />
+          <main className="flex-1 p-6 overflow-auto">
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+
+              {/* Accessible to both user & admin */}
+              <Route path="/orders" element={<Orders />} />
+              <Route path="/payments" element={<Payments />} />
+
+              {/* Admin-only routes */}
+              {role === "admin" && (
+                <>
+                  <Route path="/users" element={<Users />} />
+                  <Route path="/drivers" element={<Drivers />} />
+                  <Route path="/events" element={<Events />} />
+                </>
+              )}
+
+              {/* Catch-all redirect */}
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </main>
+        </div>
+      )}
     </BrowserRouter>
   );
 }

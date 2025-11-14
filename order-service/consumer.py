@@ -16,6 +16,8 @@ load_dotenv()
 
 USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
 DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
+PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL")
+
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 session = aioboto3.Session()
@@ -142,35 +144,35 @@ async def handle_driver_assigned(event_data: dict) -> None:
 # -------------------------------------------------------------------
 # Handle payment.completed or payment.processed
 # -------------------------------------------------------------------
-async def handle_payment_completed(event: dict) -> None:
+async def handle_payment_completed(event: dict):
     order_id = event.get("order_id")
     if not order_id:
         print("[WARN] payment.completed missing order_id")
         return
 
-    try:
-        #  mark as paid
-        update_query = (
-            orders.update()
-            .where(orders.c.id == order_id)
-            .values(payment_status="paid", status="paid")
-        )
-        await database.execute(update_query)
-        print(f"[Order] {order_id} marked as PAID")
+    # Retry fetching order if not yet in DB
+    for attempt in range(3):
+        order = await database.fetch_one(orders.select().where(orders.c.id == order_id))
+        if order:
+            break
+        print(f"[INFO] Order {order_id} not found, retrying...")
+        await asyncio.sleep(0.5)
+    else:
+        print(f"[ERROR] Order {order_id} still not found after retries")
+        return
 
-        #  Log & broadcast
-        await log_event_to_db("payment.completed", event)
-        await publish_event("payment.completed", {"order_id": order_id})
+    update_query = (
+        orders.update()
+        .where(orders.c.id == order_id)
+        .values(payment_status="paid", status="paid")
+    )
+    await database.execute(update_query)
+    print(f"[Order] {order_id} marked as PAID")
 
-        #  auto-assign driver
-        driver_id = await find_available_driver()
-        if driver_id:
-            await assign_driver(order_id, driver_id)
-        else:
-            print(f"[Order] No available driver found for order {order_id}")
+    await log_event_to_db("payment.completed", event, source_service="order-service")
+    await publish_event("payment.completed", {"order_id": order_id})
 
-    except Exception as e:
-        print(f"[handle_payment_completed error] {e}")
+
 
 
 # -------------------------------------------------------------------

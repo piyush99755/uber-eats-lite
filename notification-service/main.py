@@ -2,7 +2,7 @@ import asyncio
 import uuid
 import os
 from typing import Optional
-from fastapi import FastAPI, Query, Request, Response
+from fastapi import FastAPI, Query, Request, Response, Depends, HTTPException
 from database import database, metadata, engine
 from models import notifications, events
 from schemas import NotificationCreate, Notification
@@ -26,6 +26,24 @@ EVENTS_FAILED = Counter('events_failed_total', 'Total events failed', ['event_ty
 def metrics():
     """Prometheus metrics endpoint."""
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+# ------------------------
+# Dependencies: Current User
+# ------------------------
+def get_current_user(request: Request):
+    """
+    Extracts user info from headers: x-user-id, x-user-role, x-trace-id
+    """
+    user_id = request.headers.get("x-user-id")
+    role = request.headers.get("x-user-role")
+    trace_id = request.headers.get("x-trace-id") or str(uuid.uuid4())
+    request.state.trace_id = trace_id
+    return {"id": user_id, "role": role, "trace_id": trace_id}
+
+def admin_required(user=Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden: Admins only")
+    return user
 
 # -------------------
 # Startup / Shutdown Lifecycle
@@ -68,9 +86,11 @@ async def add_trace_to_request(request: Request, call_next):
 # Notification Endpoints
 # -------------------
 @app.post("/notifications", response_model=Notification)
-async def create_notification_api(notification: NotificationCreate, request: Request):
+async def create_notification_api(
+    notification: NotificationCreate, user=Depends(get_current_user)
+):
     notification_id = str(uuid.uuid4())
-    trace_id = request.state.trace_id
+    trace_id = user["trace_id"]
 
     query = notifications.insert().values(
         id=notification_id,
@@ -94,7 +114,7 @@ async def create_notification_api(notification: NotificationCreate, request: Req
     return Notification(id=notification_id, **notification.dict())
 
 @app.get("/notifications", response_model=list[Notification])
-async def list_notifications():
+async def list_notifications(user=Depends(get_current_user)):
     rows = await database.fetch_all(
         notifications.select().order_by(notifications.c.id.desc())
     )
@@ -109,7 +129,9 @@ async def list_events(
     limit: int = Query(50, gt=0, le=200),
     event_type: Optional[str] = None,
     source_service: Optional[str] = None,
+    user=Depends(get_current_user)
 ):
+    trace_id = user["trace_id"]
     query = events.select()
     if event_type:
         query = query.where(events.c.event_type == event_type)
