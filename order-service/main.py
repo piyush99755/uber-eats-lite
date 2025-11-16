@@ -1,73 +1,106 @@
 import uuid
 import asyncio
 import json
-from fastapi import FastAPI, HTTPException, Request, Depends
+import os
+import logging
+import jwt  # PyJWT
+from typing import List
+
+from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sse_clients import clients
+
 from database import database
 from models import orders, event_logs
-from schemas import OrderCreate, Order, AssignDriver, EventLog, OrderUpdate
+from schemas import OrderCreate, Order, EventLog, OrderUpdate
 from events import publish_event
-from consumer import poll_messages, poll_payment_messages
+from consumer import poll_driver_queue, poll_payment_queue, handle_payment_completed
+from ws_manager import manager  # WebSocket manager
 
-app = FastAPI(title="Order Service", version="1.2.0")
+# ----------------------------------------------------------------------
+# Config
+# ----------------------------------------------------------------------
+SECRET_KEY = os.getenv("JWT_SECRET", "demo_secret")
+ALGORITHM = "HS256"
 
-# ─────────────────────────────────────────────
-# 🔐 Dependencies: Current User
-# ─────────────────────────────────────────────
+# ----------------------------------------------------------------------
+# Logging Setup
+# ----------------------------------------------------------------------
+logger = logging.getLogger("order-service")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    fmt = "[%(asctime)s] [%(levelname)s] %(message)s"
+    handler.setFormatter(logging.Formatter(fmt))
+    logger.addHandler(handler)
+
+# ----------------------------------------------------------------------
+# FastAPI App
+# ----------------------------------------------------------------------
+app = FastAPI(title="Order Service", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
+
+# ----------------------------------------------------------------------
+# Auth helpers
+# ----------------------------------------------------------------------
+def validate_token(token: str):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except Exception:
+        return None
+
 def get_current_user(request: Request):
-    """Extract user identity and tracing headers."""
     user_id = request.headers.get("x-user-id")
     role = request.headers.get("x-user-role")
     trace_id = request.headers.get("x-trace-id") or str(uuid.uuid4())
     request.state.trace_id = trace_id
     return {"id": user_id, "role": role, "trace_id": trace_id}
 
-
 def admin_required(user=Depends(get_current_user)):
-    """Ensure only admins can access certain endpoints."""
     if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Forbidden: Admins only")
+        raise HTTPException(status_code=403, detail="Admins only")
     return user
 
-
-# ─────────────────────────────────────────────
-# 🚀 Startup & Shutdown
-# ─────────────────────────────────────────────
+# ----------------------------------------------------------------------
+# Startup / Shutdown
+# ----------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
+    logger.info("Connecting database...")
     await database.connect()
-    try:
-        # start driver queue consumer
-        asyncio.create_task(poll_messages())
-        print("[Startup] ✅ Background consumer for driver.assigned started.")
-
-        # start payment queue consumer
-        asyncio.create_task(poll_payment_messages())
-        print("[Startup] ✅ Background consumer for payment.processed started.")
-    except Exception as e:
-        print(f"[Startup Error] ❌ Failed to start consumers: {e}")
+    asyncio.create_task(poll_driver_queue())
+    logger.info("🚀 Started SQS driver queue consumer")
+    asyncio.create_task(poll_payment_queue())
+    logger.info("🚀 Started SQS payment queue consumer")
+    logger.info("Startup complete.")
 
 @app.on_event("shutdown")
 async def shutdown():
+    logger.info("Disconnecting database...")
     await database.disconnect()
 
-
-# ─────────────────────────────────────────────
-# 🩺 Health Check
-# ─────────────────────────────────────────────
-@app.get("/health", tags=["Health"])
-async def health_check():
+# ----------------------------------------------------------------------
+# Health
+# ----------------------------------------------------------------------
+@app.get("/health")
+async def health():
     return {"status": "ok", "service": "order-service"}
 
-
-# ─────────────────────────────────────────────
-# 🧾 Create Order
-# ─────────────────────────────────────────────
+# ----------------------------------------------------------------------
+# Orders CRUD
+# ----------------------------------------------------------------------
 @app.post("/orders", response_model=Order)
 async def create_order(order: OrderCreate, user=Depends(get_current_user), request: Request = None):
+    trace_id = request.state.trace_id
     order_id = str(uuid.uuid4())
-    trace_id = getattr(request.state, "trace_id", user.get("trace_id"))
-
-    # Insert order into database
     query = orders.insert().values(
         id=order_id,
         user_id=order.user_id,
@@ -75,177 +108,151 @@ async def create_order(order: OrderCreate, user=Depends(get_current_user), reque
         total=order.total,
         status="pending",
         payment_status="pending",
-        driver_id=None
+        driver_id=None,
     )
     await database.execute(query)
-
-    # Publish event (safe call)
-    try:
-        await publish_event("order.created", {
-            "id": order_id,
-            "user_id": order.user_id,
-            "items": order.items,
-            "total": order.total,
-            "status": "pending",
-            "payment_status": "pending"
-        }, trace_id=trace_id)
-    except TypeError:
-        # Fallback for legacy publish_event without trace_id
-        await publish_event("order.created", {
-            "id": order_id,
-            "user_id": order.user_id,
-            "items": order.items,
-            "total": order.total,
-            "status": "pending",
-            "payment_status": "pending"
-        })
-
-    print(f"[TRACE {trace_id}] ✅ Order {order_id} created by {user['id']}")
+    payload = {
+        "id": order_id,
+        "user_id": order.user_id,
+        "items": order.items,
+        "total": order.total,
+        "status": "pending",
+        "payment_status": "pending",
+    }
+    await publish_event("order.created", payload, trace_id=trace_id)
+    logger.info(f"[TRACE {trace_id}] ✅ Order {order_id} created by {user['id']}")
     return Order(id=order_id, status="pending", payment_status="pending", **order.dict())
 
-
-# ─────────────────────────────────────────────
-# 📋 List Orders
-# ─────────────────────────────────────────────
-@app.get("/orders", response_model=list[Order])
+@app.get("/orders", response_model=List[Order])
 async def list_orders(user=Depends(get_current_user)):
-    results = await database.fetch_all(orders.select())
-    parsed = []
-
-    for row in results:
+    rows = await database.fetch_all(orders.select())
+    result = []
+    for row in rows:
         data = dict(row)
         try:
             data["items"] = json.loads(data["items"])
-        except (TypeError, json.JSONDecodeError):
+        except Exception:
             data["items"] = []
-        parsed.append(Order(**data))
+        result.append(Order(**data))
+    return result
 
-    return parsed
-
-
-# ─────────────────────────────────────────────
-# 🔍 Get Order by ID
-# ─────────────────────────────────────────────
-@app.get("/orders/{order_id}", response_model=Order, tags=["Orders"])
+@app.get("/orders/{order_id}", response_model=Order)
 async def get_order(order_id: str, user=Depends(get_current_user)):
-    order = await database.fetch_one(orders.select().where(orders.c.id == order_id))
-    if not order:
+    row = await database.fetch_one(orders.select().where(orders.c.id == order_id))
+    if not row:
         raise HTTPException(status_code=404, detail="Order not found")
-    return Order(**dict(order))
+    data = dict(row)
+    try:
+        data["items"] = json.loads(data["items"])
+    except Exception:
+        pass
+    return Order(**data)
 
-
-# ─────────────────────────────────────────────
-# 🚚 Assign Driver Manually
-# ─────────────────────────────────────────────
-@app.post("/orders/{order_id}/assign-driver", tags=["Orders"])
-async def assign_driver(order_id: str, assignment: AssignDriver, user=Depends(get_current_user), request: Request = None):
-    trace_id = getattr(request.state, "trace_id", user.get("trace_id"))
-
-    existing_order = await database.fetch_one(orders.select().where(orders.c.id == order_id))
-    if not existing_order:
+@app.put("/orders/{order_id}", response_model=Order)
+async def update_order(order_id: str, body: OrderUpdate, user=Depends(get_current_user), request: Request = None):
+    trace_id = request.state.trace_id
+    existing = await database.fetch_one(orders.select().where(orders.c.id == order_id))
+    if not existing:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    await database.execute(
-        orders.update().where(orders.c.id == order_id).values(driver_id=assignment.driver_id)
-    )
+    update_vals = {}
+    if body.items is not None:
+        update_vals["items"] = json.dumps(body.items)
+    if body.total is not None:
+        update_vals["total"] = body.total
+    if body.status is not None:
+        update_vals["status"] = body.status
+    if body.driver_id is not None:
+        update_vals["driver_id"] = body.driver_id
 
+    await database.execute(orders.update().where(orders.c.id == order_id).values(**update_vals))
+    updated = {**dict(existing), **update_vals}
     try:
-        await publish_event("driver.assigned", {
-            "order_id": order_id,
-            "driver_id": assignment.driver_id,
-            "user_id": existing_order["user_id"]
-        }, trace_id=trace_id)
-    except TypeError:
-        await publish_event("driver.assigned", {
-            "order_id": order_id,
-            "driver_id": assignment.driver_id,
-            "user_id": existing_order["user_id"]
-        })
+        updated["items"] = json.loads(updated["items"])
+    except Exception:
+        pass
 
-    print(f"[TRACE {trace_id}] 🚗 Driver {assignment.driver_id} assigned to order {order_id} by {user['id']}")
-    return {"message": f"Driver {assignment.driver_id} assigned to order {order_id}"}
+    await publish_event("order.updated", {"id": order_id, **update_vals}, trace_id=trace_id)
+    logger.info(f"[TRACE {trace_id}] ✏️ Order {order_id} updated by {user['id']}")
+    return Order(**updated)
 
-
-# ─────────────────────────────────────────────
-# 📜 Events Endpoint
-# ─────────────────────────────────────────────
-@app.get("/events", response_model=list[EventLog], tags=["Events"])
-async def get_events(limit: int = 50, user=Depends(get_current_user)):
-    try:
-        query = event_logs.select().order_by(event_logs.c.created_at.desc()).limit(limit)
-        results = await database.fetch_all(query)
-
-        events = []
-        for row in results:
-            row_dict = dict(row)
-            if isinstance(row_dict["payload"], str):
-                try:
-                    row_dict["payload"] = json.loads(row_dict["payload"])
-                except json.JSONDecodeError:
-                    pass
-            events.append(EventLog(**row_dict))
-        return events
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ─────────────────────────────────────────────
-# ❌ Delete Order
-# ─────────────────────────────────────────────
-@app.delete("/orders/{order_id}", tags=["Orders"])
+@app.delete("/orders/{order_id}")
 async def delete_order(order_id: str, user=Depends(admin_required), request: Request = None):
-    trace_id = getattr(request.state, "trace_id", user.get("trace_id"))
-
-    existing_order = await database.fetch_one(orders.select().where(orders.c.id == order_id))
-    if not existing_order:
+    trace_id = request.state.trace_id
+    existing = await database.fetch_one(orders.select().where(orders.c.id == order_id))
+    if not existing:
         raise HTTPException(status_code=404, detail="Order not found")
-
     await database.execute(orders.delete().where(orders.c.id == order_id))
+    await publish_event("order.deleted", {"id": order_id}, trace_id=trace_id)
+    logger.info(f"[TRACE {trace_id}] 🗑️ Order {order_id} deleted by {user['id']}")
+    return {"message": "Order deleted"}
 
+# ----------------------------------------------------------------------
+# Event logs
+# ----------------------------------------------------------------------
+@app.get("/events", response_model=List[EventLog])
+async def get_events(limit: int = 50, user=Depends(get_current_user)):
+    rows = await database.fetch_all(event_logs.select().order_by(event_logs.c.created_at.desc()).limit(limit))
+    result = []
+    for row in rows:
+        row = dict(row)
+        if isinstance(row.get("payload"), str):
+            try:
+                row["payload"] = json.loads(row["payload"])
+            except Exception:
+                pass
+        result.append(EventLog(**row))
+    return result
+
+# ----------------------------------------------------------------------
+# WebSocket endpoint
+# ----------------------------------------------------------------------
+@app.websocket("/ws/orders")
+async def websocket_orders(websocket: WebSocket):
+    await manager.connect(websocket)
     try:
-        await publish_event("order.deleted", {"id": order_id}, trace_id=trace_id)
-    except TypeError:
-        await publish_event("order.deleted", {"id": order_id})
+        while True:
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception:
+        manager.disconnect(websocket)
 
-    print(f"[TRACE {trace_id}] 🗑️ Order {order_id} deleted by {user['id']}")
-    return {"message": f"Order {order_id} deleted successfully"}
+# ----------------------------------------------------------------------
+# SSE endpoint (ready for API Gateway proxy)
+# ----------------------------------------------------------------------
+@app.get("/orders/orders/events/stream")
+async def sse_orders(token: str = Query(...)):
+    payload = validate_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
+    queue = asyncio.Queue()
+    clients.append(queue)
 
-# ─────────────────────────────────────────────
-# ✏️ Update Order
-# ─────────────────────────────────────────────
-@app.put("/orders/{order_id}", response_model=Order, tags=["Orders"])
-async def update_order(order_id: str, order: OrderUpdate, user=Depends(get_current_user), request: Request = None):
-    trace_id = getattr(request.state, "trace_id", user.get("trace_id"))
+    async def event_generator():
+        try:
+            while True:
+                event = await queue.get()
+                yield f"data: {json.dumps(event)}\n\n"
+        except asyncio.CancelledError:
+            return
+        finally:
+            if queue in clients:
+                clients.remove(queue)
 
-    existing_order = await database.fetch_one(orders.select().where(orders.c.id == order_id))
-    if not existing_order:
-        raise HTTPException(status_code=404, detail="Order not found")
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-    update_data = {}
-    if order.items is not None:
-        update_data["items"] = json.dumps(order.items)
-    if order.total is not None:
-        update_data["total"] = order.total
-    if order.status is not None:
-        update_data["status"] = order.status
-    if order.driver_id is not None:
-        update_data["driver_id"] = order.driver_id
-
-    if not update_data:
-        raise HTTPException(status_code=400, detail="No fields to update")
-
-    await database.execute(orders.update().where(orders.c.id == order_id).values(**update_data))
-
-    updated_order = {**dict(existing_order), **update_data}
-    updated_order["items"] = (
-        json.loads(updated_order["items"]) if isinstance(updated_order["items"], str) else updated_order["items"]
-    )
-
-    try:
-        await publish_event("order.updated", {"id": order_id, **update_data}, trace_id=trace_id)
-    except TypeError:
-        await publish_event("order.updated", {"id": order_id, **update_data})
-
-    print(f"[TRACE {trace_id}] ✏️ Order {order_id} updated by {user['id']}")
-    return Order(**updated_order)
+@app.post("/webhook/payment")
+async def webhook_payment(request: Request):
+    """
+    Receives payment events from payment-service (local dev mode)
+    """
+    body = await request.json()
+    payload = body.get("data", {})
+    trace_id = body.get("trace_id") or "local"
+    
+    await handle_payment_completed(payload)
+    
+    logger.info(f"[LOCAL WEBHOOK] payment event received, trace_id={trace_id}")
+    return {"status": "ok"}

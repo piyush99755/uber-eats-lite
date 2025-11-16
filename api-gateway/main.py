@@ -4,7 +4,8 @@ import json
 import asyncio
 import logging
 from jose import jwt, JWTError
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, Query,WebSocket, Depends
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
@@ -95,6 +96,7 @@ async def add_trace_id(request: Request, call_next):
     trace_id = request.headers.get("x-trace-id") or str(uuid.uuid4())
     request.state.trace_id = trace_id
     response = await call_next(request)
+    # Ensure we always set trace id on response
     response.headers["x-trace-id"] = trace_id
     logger.info(f"[TRACE {trace_id}] {request.method} {request.url.path}")
     return response
@@ -168,6 +170,62 @@ async def preflight(full_path: str, request: Request):
     return Response(status_code=200, headers=headers)
 
 # --------------------------------------------------
+# SSE proxy endpoint (special handling to stream)
+# --------------------------------------------------
+@app.get("/orders/orders/events/stream")
+async def sse_proxy(request: Request, token: str = Query(...)):
+    """Forward SSE stream to order-service (exact same path)."""
+
+    target_url = f"{SERVICES['orders']}/orders/orders/events/stream?token={token}"
+    logger.info(f"[SSE] Proxy → {target_url}")
+
+    headers = {
+        "x-trace-id": request.state.trace_id,
+        "Accept": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            resp = await client.get(
+                target_url, 
+                headers=headers,
+                timeout=None,
+                follow_redirects=True
+            )
+
+            # If order-service returns error, propagate it
+            if resp.status_code != 200:
+                return Response(
+                    content=resp.content,
+                    status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type", "application/json")
+                )
+
+            # Correct SSE headers
+            return StreamingResponse(
+                resp.aiter_bytes(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                    "Access-Control-Allow-Origin": "*"
+                },
+            )
+
+    except Exception as e:
+        logger.error(f"[SSE ERROR] {e}")
+        return Response(
+            content=json.dumps({"error": "SSE proxy failed"}),
+            status_code=500,
+            media_type="application/json",
+        )
+
+
+
+# --------------------------------------------------
 # Main proxy route
 # --------------------------------------------------
 @app.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
@@ -234,13 +292,20 @@ async def proxy(request: Request, service: str, path: str = ""):
                 content=await request.body(),
             )
 
+        # Keep original content-type when possible
+        media_type = proxied_response.headers.get("content-type", "application/json")
+        # Build response
         response = Response(
             content=proxied_response.content,
             status_code=proxied_response.status_code,
-            media_type=proxied_response.headers.get("content-type", "application/json"),
+            media_type=media_type,
         )
+        # add CORS headers
         for k, v in cors_headers.items():
             response.headers[k] = v
+        # preserve trace id
+        response.headers["x-trace-id"] = request.state.trace_id
+
         return response
 
     except httpx.ConnectError:
@@ -259,3 +324,42 @@ async def proxy(request: Request, service: str, path: str = ""):
             media_type="application/json",
             headers=cors_headers,
         )
+@app.websocket("/ws/orders")
+async def orders_ws(websocket: WebSocket):
+    await websocket.accept()
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=4001)
+        return
+
+    user_claims = decode_jwt(token)
+    if not user_claims:
+        await websocket.close(code=4002)
+        return
+
+    sse_url = f"{SERVICES['orders']}/orders/orders/events/stream?token={token}"
+    headers = {
+        "Accept": "text/event-stream",
+        "x-trace-id": str(uuid.uuid4()),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("GET", sse_url, headers=headers) as sse_resp:
+                if sse_resp.status_code != 200:
+                    await websocket.send_json({"error": "Failed to connect to order service SSE"})
+                    await websocket.close()
+                    return
+
+                async for line in sse_resp.aiter_lines():
+                    if line.startswith("data:"):
+                        data_str = line[5:].strip()
+                        try:
+                            event = json.loads(data_str)
+                            await websocket.send_json(event)
+                        except Exception as e:
+                            logger.error(f"Failed to send event to WebSocket: {e}")
+    except Exception as e:
+        logger.error(f"SSE proxy error: {e}")
+    finally:
+        await websocket.close()

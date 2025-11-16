@@ -1,3 +1,4 @@
+# database.py
 import os
 from databases import Database
 from sqlalchemy import create_engine, MetaData
@@ -8,8 +9,11 @@ DATABASE_URL = os.getenv(
 )
 
 database = Database(DATABASE_URL)
+
 SYNC_DATABASE_URL = DATABASE_URL.replace("+asyncpg", "")
 engine = create_engine(SYNC_DATABASE_URL)
+
+# Single shared metadata
 metadata = MetaData()
 
 def init_db():

@@ -5,7 +5,7 @@ import { Modal } from "./Modal";
 import { Button } from "./Button";
 
 const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLIC_KEY!);
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8008";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 interface PaymentModalProps {
   show: boolean;
@@ -40,36 +40,51 @@ const CheckoutForm: React.FC<PaymentModalProps> = ({ show, onClose, orderId, amo
     setError("");
 
     try {
+      // 1️⃣ Create payment intent on backend
       const res = await fetch(`${API_BASE_URL}/payments/create-intent`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({
-          order_id: orderId,
-          user_id,
-          amount,
-        }),
+        body: JSON.stringify({ order_id: orderId, user_id, amount }),
       });
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Server responded with ${res.status}: ${text}`);
-      }
-
+      if (!res.ok) throw new Error(`Server responded with ${res.status}`);
       const data = await res.json();
       const clientSecret = data.client_secret;
       if (!clientSecret) throw new Error("Missing client_secret");
 
+      // 2️⃣ Confirm card payment with Stripe
       const result = await stripe.confirmCardPayment(clientSecret, {
         payment_method: { card: elements.getElement(CardElement)! },
       });
 
       if (result.error) {
         setError(result.error.message || "Payment failed");
-      } else if (result.paymentIntent?.status === "succeeded") {
-        alert("✅ Payment successful!");
+        return;
+      }
+
+      if (result.paymentIntent?.status === "succeeded") {
+        // 3️⃣ Notify backend to confirm payment
+        const confirmRes = await fetch(`${API_BASE_URL}/payments/confirm-payment`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            payment_intent_id: result.paymentIntent.id,
+            order_id: orderId,
+          }),
+        });
+
+        if (!confirmRes.ok) {
+          const text = await confirmRes.text();
+          throw new Error(`Confirm payment failed: ${text}`);
+        }
+
+        // ✅ Close modal, WebSocket will handle UI update & toast
         onClose();
       }
     } catch (err: any) {
