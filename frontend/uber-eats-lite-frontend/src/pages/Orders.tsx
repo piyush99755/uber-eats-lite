@@ -18,6 +18,8 @@ interface Order {
   status: OrderStatus;
   driver_id?: string | null;
   payment_status?: string;
+  // UI helper flag (not persisted to backend)
+  assigning?: boolean;
   [k: string]: any;
 }
 
@@ -72,13 +74,17 @@ export default function Orders() {
   const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
   const wsRef = useRef<WebSocket | null>(null);
 
+  // Dedup / toast trackers
   const recentlyCreated = useRef<Set<string>>(new Set());
   const recentlyPaid = useRef<Set<string>>(new Set());
+  const recentlyAssigning = useRef<Set<string>>(new Set());
+  const recentlyAssigned = useRef<Set<string>>(new Set());
 
+  // Utility
   const safeItemsToString = (items: any) => (Array.isArray(items) ? items.join(", ") : "");
   const normalizeId = (o: any) => o?.id ?? o?.order_id ?? o?.orderId ?? o?.orderID ?? null;
 
-  // ---------------- fetch initial orders ----------------
+  // ---------- fetch initial orders ----------
   const fetchOrders = useCallback(async () => {
     try {
       const res = await api.get<Order[]>("/orders/orders", {
@@ -92,7 +98,10 @@ export default function Orders() {
         ...o,
         items: Array.isArray(o.items) ? o.items : [],
         user_name: o.user_id === currentUserId ? "You" : o.user_id,
+        // show assigning if paid but no driver
+        assigning: o.status === "paid" && !o.driver_id,
       }));
+      // newest first
       setOrders(annotated.reverse());
     } catch (err) {
       console.error("Failed fetching orders:", err);
@@ -105,7 +114,7 @@ export default function Orders() {
     fetchOrders();
   }, [fetchOrders]);
 
-  // ---------------- fetch single order ----------------
+  // ---------- fetch single order ----------
   const fetchSingleOrder = useCallback(
     async (orderId: string) => {
       try {
@@ -117,6 +126,7 @@ export default function Orders() {
           ...o,
           items: Array.isArray(o.items) ? o.items : [],
           user_name: o.user_id === currentUserId ? "You" : o.user_id,
+          assigning: o.status === "paid" && !o.driver_id,
         } as Order;
       } catch (err) {
         console.warn(`[fetchSingleOrder] couldn't fetch ${orderId}:`, err);
@@ -126,69 +136,86 @@ export default function Orders() {
     [currentUserId]
   );
 
-  // ---------------- pure upsert (returns new array) ----------------
-  const upsertOrderPure = useCallback((prev: Order[], incoming: Partial<Order> & { id: string }) => {
-    // Build map of existing
-    const map = new Map(prev.map((p) => [p.id, { ...p }]));
+  // ---------- pure upsert (returns new array) ----------
+  const upsertOrderPure = useCallback(
+    (prev: Order[], incoming: Partial<Order> & { id: string }) => {
+      const map = new Map(prev.map((p) => [p.id, { ...p }]));
+      const id = incoming.id;
+      const existing = map.get(id);
 
-    const id = incoming.id;
-    const existing = map.get(id);
+      // compute merged assigning flag:
+      const computeAssigning = (existingVal?: Order, incomingVal?: Partial<Order>) => {
+        // if incoming explicitly sets driver_id -> not assigning
+        if (incomingVal?.driver_id) return false;
+        // if incoming status is 'paid' and no driver known -> assigning true
+        if ((incomingVal?.status ?? existingVal?.status) === "paid") {
+          const hasDriver = incomingVal?.driver_id ?? existingVal?.driver_id;
+          return !hasDriver;
+        }
+        // otherwise false
+        return false;
+      };
 
-    const merged: Order =
-      existing != null
-        ? {
-            ...existing,
-            ...incoming,
-            items:
-              incoming.items !== undefined
-                ? Array.isArray(incoming.items)
-                  ? incoming.items
-                  : existing.items ?? []
-                : existing.items ?? [],
-            user_name:
-              incoming.user_id !== undefined
-                ? incoming.user_id === currentUserId
+      const merged: Order =
+        existing != null
+          ? {
+              ...existing,
+              ...incoming,
+              items:
+                incoming.items !== undefined
+                  ? Array.isArray(incoming.items)
+                    ? incoming.items
+                    : existing.items ?? []
+                  : existing.items ?? [],
+              user_name:
+                incoming.user_id !== undefined
+                  ? incoming.user_id === currentUserId
+                    ? "You"
+                    : incoming.user_id
+                  : existing.user_name,
+              // ensure assigning flag preserved / recalculated
+              assigning: computeAssigning(existing, incoming),
+            }
+          : {
+              id,
+              user_id: incoming.user_id ?? (incoming as any).userId ?? "unknown",
+              user_name:
+                (incoming.user_id ?? (incoming as any).userId) === currentUserId
                   ? "You"
-                  : incoming.user_id
-                : existing.user_name,
-          }
-        : {
-            id,
-            user_id: incoming.user_id ?? (incoming as any).userId ?? "unknown",
-            user_name:
-              (incoming.user_id ?? (incoming as any).userId) === currentUserId
-                ? "You"
-                : incoming.user_id ?? (incoming as any).userId ?? "unknown",
-            items: Array.isArray(incoming.items) ? incoming.items : [],
-            total:
-              typeof incoming.total === "number"
-                ? incoming.total
-                : incoming.total
-                ? Number(incoming.total)
-                : 0,
-            status: (incoming.status as OrderStatus) ?? "pending",
-            driver_id: incoming.driver_id ?? null,
-            ...incoming,
-          };
+                  : incoming.user_id ?? (incoming as any).userId ?? "unknown",
+              items: Array.isArray(incoming.items) ? incoming.items : [],
+              total:
+                typeof incoming.total === "number"
+                  ? incoming.total
+                  : incoming.total
+                  ? Number(incoming.total)
+                  : 0,
+              status: (incoming.status as OrderStatus) ?? "pending",
+              driver_id: incoming.driver_id ?? null,
+              assigning: computeAssigning(undefined, incoming),
+              ...incoming,
+            };
 
-    map.set(id, merged);
+      map.set(id, merged);
 
-    // keep new items at front, preserve previous order for existing
-    const prevIds = new Set(prev.map((p) => p.id));
-    const all = Array.from(map.values());
+      // keep new ones at front, preserve previous order for existing
+      const prevIds = new Set(prev.map((p) => p.id));
+      const all = Array.from(map.values());
 
-    const newOnes: Order[] = [];
-    const existingOnes: Order[] = [];
-    for (const o of all) {
-      if (!prevIds.has(o.id)) newOnes.push(o);
-      else existingOnes.push(o);
-    }
-    const orderedExisting = prev.map((p) => map.get(p.id)).filter(Boolean) as Order[];
+      const newOnes: Order[] = [];
+      const existingOnes: Order[] = [];
+      for (const o of all) {
+        if (!prevIds.has(o.id)) newOnes.push(o);
+        else existingOnes.push(o);
+      }
+      const orderedExisting = prev.map((p) => map.get(p.id)).filter(Boolean) as Order[];
 
-    return [...newOnes.reverse(), ...orderedExisting];
-  }, [currentUserId]);
+      return [...newOnes.reverse(), ...orderedExisting];
+    },
+    [currentUserId]
+  );
 
-  // ---------------- WebSocket: robust hybrid handler ----------------
+  // ---------- WebSocket handler (with assigning notifications) ----------
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) return;
@@ -233,31 +260,28 @@ export default function Orders() {
         const orderId = normalizeId(payload) ?? normalizeId(parsed) ?? payload?.order_id ?? payload?.id ?? null;
 
         if (!eventType || !orderId) {
-          // If envelope has id but not order id, ignore (we saw events using envelope id).
+          // missing order id: ignore
           return;
         }
 
-        // Consider payload partial if it lacks essential fields
+        // detect partial payloads
         const payloadIsPartial =
           !payload.user_id ||
           !Array.isArray(payload.items) ||
           payload.items.length === 0 ||
           typeof payload.total !== "number";
 
-        // Resolve authoritative order (hybrid C)
         const resolveAuthoritative = async (): Promise<Order | null> => {
           if (!payloadIsPartial) {
             return { ...(payload as any), id: orderId, items: Array.isArray(payload.items) ? payload.items : [] } as Order;
           }
-          // payload partial -> attempt fetch
           const full = await fetchSingleOrder(orderId);
           if (full) return full;
-          // fetch failed -> return null
           return null;
         };
 
         try {
-          // ---------- order.created ----------
+          // order.created
           if (eventType.startsWith("order.created") || eventType.startsWith("order_create") || eventType.startsWith("order.create")) {
             const authoritative = await resolveAuthoritative();
             if (!authoritative) {
@@ -265,45 +289,57 @@ export default function Orders() {
               return;
             }
 
-            setOrders((prev) => {
-              // single setOrders call using pure upsert
-              return upsertOrderPure(prev, authoritative);
-            });
+            setOrders((prev) => upsertOrderPure(prev, authoritative));
 
+            // toast new order for owner or everyone (small info)
             if (!recentlyCreated.current.has(orderId)) {
-              toast.info(`🆕 New order: ${orderId}`);
+              if (authoritative.user_id === currentUserId) {
+                toast.info(`🆕 You created order ${orderId}`);
+              } else {
+                toast.info(`🆕 New order: ${orderId}`);
+              }
             }
             recentlyCreated.current.add(orderId);
             setTimeout(() => recentlyCreated.current.delete(orderId), 60_000);
             return;
           }
 
-          // ---------- order.updated ----------
+          // order.updated
           if (eventType.startsWith("order.updated") || eventType.startsWith("order_update") || eventType.startsWith("order.update")) {
-            // try to get authoritative
             const authoritative = await resolveAuthoritative();
 
             if (authoritative) {
-              // we have full data -> upsert
-              setOrders((prev) => upsertOrderPure(prev, authoritative));
-
-              // toast if payment transitioned
+              // We have full authoritative order
               setOrders((prev) => {
                 const before = prev.find((p) => p.id === orderId);
+                const afterArr = upsertOrderPure(prev, authoritative);
+                // detect payment transition -> toast
                 if (before && before.status !== "paid" && authoritative.status === "paid") {
                   if (!recentlyPaid.current.has(orderId)) {
-                    toast.success(`💳 Payment successful for order ${orderId}`);
+                    if (authoritative.user_id === currentUserId) {
+                      toast.success(`💳 Payment successful for your order ${orderId}`);
+                    } else {
+                      toast.success(`💳 Payment successful for order ${orderId}`);
+                    }
                     recentlyPaid.current.add(orderId);
                     setTimeout(() => recentlyPaid.current.delete(orderId), 60_000);
                   }
+                  // if paid and no driver -> show assigning toast (only for owner)
+                  if (!authoritative.driver_id && authoritative.user_id === currentUserId) {
+                    if (!recentlyAssigning.current.has(orderId)) {
+                      toast.info(`🔎 Assigning driver for your order ${orderId}…`);
+                      recentlyAssigning.current.add(orderId);
+                      setTimeout(() => recentlyAssigning.current.delete(orderId), 60_000);
+                    }
+                  }
                 }
-                return prev;
+                return afterArr;
               });
 
               return;
             }
 
-            // authoritative fetch failed -> hybrid: if order exists locally, merge partial; else ignore
+            // authoritative fetch failed -> merge partial only if exists locally
             setOrders((prev) => {
               const exists = prev.some((p) => p.id === orderId);
               if (!exists) {
@@ -311,18 +347,26 @@ export default function Orders() {
                 return prev;
               }
 
-              // merge partial into existing (single state update)
               const incoming: Partial<Order> & { id: string } = { id: orderId, ...(payload || {}) };
               const newArr = upsertOrderPure(prev, incoming);
 
-              // detect payment transition by comparing before/after
+              // detect transitions
               const before = prev.find((p) => p.id === orderId)!;
               const after = newArr.find((p) => p.id === orderId)!;
               if (before.status !== "paid" && after.status === "paid") {
                 if (!recentlyPaid.current.has(orderId)) {
-                  toast.success(`💳 Payment successful for order ${orderId}`);
+                  if (after.user_id === currentUserId) {
+                    toast.success(`💳 Payment successful for your order ${orderId}`);
+                  } else {
+                    toast.success(`💳 Payment successful for order ${orderId}`);
+                  }
                   recentlyPaid.current.add(orderId);
                   setTimeout(() => recentlyPaid.current.delete(orderId), 60_000);
+                }
+                if (!after.driver_id && after.user_id === currentUserId && !recentlyAssigning.current.has(orderId)) {
+                  toast.info(`🔎 Assigning driver for your order ${orderId}…`);
+                  recentlyAssigning.current.add(orderId);
+                  setTimeout(() => recentlyAssigning.current.delete(orderId), 60_000);
                 }
               }
 
@@ -332,50 +376,77 @@ export default function Orders() {
             return;
           }
 
-          // ---------- driver.assigned ----------
+          // driver.assigned
           if (eventType.startsWith("driver.assigned") || eventType.includes("driver_assigned")) {
+            // prefer authoritative if available
             const authoritative = await resolveAuthoritative();
-            if (!authoritative) {
-              // if no authoritative and not present locally -> ignore
+
+            if (authoritative) {
               setOrders((prev) => {
-                const exists = prev.some((p) => p.id === orderId);
-                if (!exists) {
-                  console.warn("[WS] Ignoring driver.assigned for unknown order", payload);
-                  return prev;
-                }
-                // merge partial driver_id
                 const incoming: Partial<Order> & { id: string } = {
-                  id: orderId,
-                  driver_id: payload.driver_id ?? payload.driverId,
-                  status: "assigned",
+                  ...authoritative,
+                  driver_id: payload.driver_id ?? payload.driverId ?? authoritative.driver_id,
+                  status: authoritative.status === "paid" ? "paid" : "assigned",
+                  assigning: false,
                 };
-                return upsertOrderPure(prev, incoming);
+                const newArr = upsertOrderPure(prev, incoming);
+
+                // toast for owner
+                if (!recentlyAssigned.current.has(orderId)) {
+                  if (incoming.user_id === currentUserId || authoritative.user_id === currentUserId) {
+                    toast.success(`🚗 Driver assigned to your order ${orderId}`);
+                  } else {
+                    toast.info(`🚗 Driver assigned to order ${orderId}`);
+                  }
+                  recentlyAssigned.current.add(orderId);
+                  setTimeout(() => recentlyAssigned.current.delete(orderId), 60_000);
+                }
+
+                return newArr;
               });
+
               return;
             }
 
-            // we have authoritative -> merge assignment
+            // authoritative missing -> merge partial
             setOrders((prev) => {
+              const exists = prev.some((p) => p.id === orderId);
+              if (!exists) {
+                console.warn("[WS] Ignoring driver.assigned for unknown order", payload);
+                return prev;
+              }
+
               const incoming: Partial<Order> & { id: string } = {
-                ...authoritative,
-                driver_id: payload.driver_id ?? payload.driverId ?? authoritative.driver_id,
-                status: authoritative.status === "paid" ? "paid" : "assigned",
+                id: orderId,
+                driver_id: payload.driver_id ?? payload.driverId,
+                status: "assigned",
+                assigning: false,
               };
-              return upsertOrderPure(prev, incoming);
+              const newArr = upsertOrderPure(prev, incoming);
+
+              if (!recentlyAssigned.current.has(orderId)) {
+                const owner = newArr.find((p) => p.id === orderId)?.user_id;
+                if (owner === currentUserId) {
+                  toast.success(`🚗 Driver assigned to your order ${orderId}`);
+                } else {
+                  toast.info(`🚗 Driver assigned to order ${orderId}`);
+                }
+                recentlyAssigned.current.add(orderId);
+                setTimeout(() => recentlyAssigned.current.delete(orderId), 60_000);
+              }
+
+              return newArr;
             });
 
-            toast.info(`🚗 Driver assigned to order ${orderId}`);
             return;
           }
 
-          // ---------- order.deleted ----------
+          // order.deleted
           if (eventType.startsWith("order.deleted") || eventType.startsWith("order_deleted")) {
             setOrders((prev) => prev.filter((o) => o.id !== orderId));
             toast.warn(`🗑 Order ${orderId} deleted`);
             return;
           }
-
-          // unknown event -> ignore
         } catch (err) {
           console.error("[WS] handler error:", err);
         }
@@ -383,6 +454,7 @@ export default function Orders() {
     };
 
     connect();
+
     return () => {
       stopped = true;
       wsRef.current?.close();
@@ -426,16 +498,13 @@ export default function Orders() {
     try {
       if (editingId) {
         const res = await api.put<Order>(`/orders/orders/${editingId}`, { ...form, total });
-        // update single order
         setOrders((prev) => prev.map((o) => (o.id === editingId ? { ...res.data, items: Array.isArray(res.data.items) ? res.data.items : [] } : o)));
         toast.success("Order updated successfully");
       } else {
         const payload = { ...form, total, user_id: form.user_id || currentUserId || "" };
         const res = await api.post<Order>("/orders/orders", payload);
 
-        // insert created order locally (single setOrders)
         setOrders((prev) => upsertOrderPure(prev, { ...(res.data as Order), id: res.data.id }));
-
         recentlyCreated.current.add(res.data.id);
         toast.success("Order created successfully");
 
@@ -506,6 +575,16 @@ export default function Orders() {
                 }`}>
                   {order.status}
                 </span>
+                {/* Inline spinner + subtle text when paid but driver not yet assigned */}
+                {order.status === "paid" && !order.driver_id && (
+                  <span className="ml-3 inline-flex items-center text-sm text-gray-600">
+                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                    </svg>
+                    Assigning driver…
+                  </span>
+                )}
               </p>
               <p><strong>Driver:</strong> {order.driver_id ?? "Unassigned"}</p>
 

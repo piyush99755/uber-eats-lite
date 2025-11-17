@@ -162,7 +162,9 @@ async def confirm_payment(req: ConfirmPaymentRequest, user=Depends(get_current_u
 # ───────────────────────────────────────────────────────────────
 @app.get("/payments")
 async def list_payments(user=Depends(get_current_user)):
-    rows = await database.fetch_all(payments.select())
+    rows = await database.fetch_all(
+        payments.select().where(payments.c.user_id == user["id"])
+    )
     return [dict(r) for r in rows]
 
 # ───────────────────────────────────────────────────────────────

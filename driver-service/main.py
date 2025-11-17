@@ -8,7 +8,7 @@ from database import database, metadata, engine
 from models import drivers
 from schemas import DriverCreate, Driver
 from events import publish_event
-from consumer import poll_messages  # background consumer
+from consumer import start_consumers
 from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
 
@@ -43,7 +43,7 @@ async def trace_middleware(request: Request, call_next):
 async def startup():
     await database.connect()
     metadata.create_all(engine)
-    asyncio.create_task(poll_messages())
+    asyncio.create_task(start_consumers())
     print("[Driver Service] ✅ Connected to DB and consumer started.")
 
 @app.on_event("shutdown")
