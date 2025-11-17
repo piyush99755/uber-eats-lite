@@ -177,11 +177,16 @@ async def update_order(order_id: str, body: OrderUpdate, user=Depends(get_curren
     return Order(**updated)
 
 @app.delete("/orders/{order_id}")
-async def delete_order(order_id: str, user=Depends(admin_required), request: Request = None):
+async def delete_order(order_id: str, user=Depends(get_current_user), request: Request = None):
     trace_id = request.state.trace_id
     existing = await database.fetch_one(orders.select().where(orders.c.id == order_id))
     if not existing:
         raise HTTPException(status_code=404, detail="Order not found")
+    
+    # Only allow admin or order owner
+    if user["role"] != "admin" and existing["user_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Forbidden: not owner or admin")
+    
     await database.execute(orders.delete().where(orders.c.id == order_id))
     await publish_event("order.deleted", {"id": order_id}, trace_id=trace_id)
     logger.info(f"[TRACE {trace_id}] 🗑️ Order {order_id} deleted by {user['id']}")
