@@ -1,37 +1,14 @@
 /// src/pages/Orders.tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import api from "../api/api";
-import { Button } from "../components/Button";
-import { Modal } from "../components/Modal";
-import { PaymentModal } from "../components/PaymentModal";
 import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 
-export type OrderStatus = "pending" | "paid" | "assigned" | "delivered";
-
-interface Order {
-  id: string;
-  user_id: string;
-  user_name?: string;
-  items: string[];
-  total: number;
-  status: OrderStatus;
-  driver_id?: string | null;
-  payment_status?: string;
-  // UI helper flag (not persisted to backend)
-  assigning?: boolean;
-  [k: string]: any;
-}
-
-interface RawEvent {
-  event?: string;
-  event_type?: string;
-  type?: string;
-  order_id?: string;
-  payload?: any;
-  data?: any;
-  id?: string; // envelope id
-}
+import { Button } from "../components/Button";
+import { PaymentModal } from "../components/PaymentModal";
+import OrderList from "../components/OrderList";
+import OrderModal from "../components/OrderModal";
+import type { Order, OrderStatus } from "../components/types";
 
 const MENU_ITEMS = [
   { name: "Burger", price: 8 },
@@ -80,7 +57,6 @@ export default function Orders() {
   const recentlyAssigning = useRef<Set<string>>(new Set());
   const recentlyAssigned = useRef<Set<string>>(new Set());
 
-  // Utility
   const safeItemsToString = (items: any) => (Array.isArray(items) ? items.join(", ") : "");
   const normalizeId = (o: any) => o?.id ?? o?.order_id ?? o?.orderId ?? o?.orderID ?? null;
 
@@ -91,17 +67,15 @@ export default function Orders() {
         headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
       });
       let fetched = Array.isArray(res.data) ? res.data : [];
-      if (!isAdmin && currentUserId) {
-        fetched = fetched.filter((o) => o.user_id === currentUserId);
-      }
+      if (!isAdmin && currentUserId) fetched = fetched.filter((o) => o.user_id === currentUserId);
+
       const annotated = fetched.map((o) => ({
         ...o,
         items: Array.isArray(o.items) ? o.items : [],
         user_name: o.user_id === currentUserId ? "You" : o.user_id,
-        // show assigning if paid but no driver
         assigning: o.status === "paid" && !o.driver_id,
       }));
-      // newest first
+
       setOrders(annotated.reverse());
     } catch (err) {
       console.error("Failed fetching orders:", err);
@@ -110,9 +84,7 @@ export default function Orders() {
     }
   }, [currentUserId, isAdmin]);
 
-  useEffect(() => {
-    fetchOrders();
-  }, [fetchOrders]);
+  useEffect(() => { fetchOrders(); }, [fetchOrders]);
 
   // ---------- fetch single order ----------
   const fetchSingleOrder = useCallback(
@@ -136,378 +108,215 @@ export default function Orders() {
     [currentUserId]
   );
 
-  // ---------- pure upsert (returns new array) ----------
+  // ---------- pure upsert ----------
   const upsertOrderPure = useCallback(
     (prev: Order[], incoming: Partial<Order> & { id: string }) => {
       const map = new Map(prev.map((p) => [p.id, { ...p }]));
       const id = incoming.id;
       const existing = map.get(id);
 
-      // compute merged assigning flag:
       const computeAssigning = (existingVal?: Order, incomingVal?: Partial<Order>) => {
-        // if incoming explicitly sets driver_id -> not assigning
         if (incomingVal?.driver_id) return false;
-        // if incoming status is 'paid' and no driver known -> assigning true
         if ((incomingVal?.status ?? existingVal?.status) === "paid") {
-          const hasDriver = incomingVal?.driver_id ?? existingVal?.driver_id;
-          return !hasDriver;
+          return !(incomingVal?.driver_id ?? existingVal?.driver_id);
         }
-        // otherwise false
         return false;
       };
 
-      const merged: Order =
-        existing != null
-          ? {
-              ...existing,
-              ...incoming,
-              items:
-                incoming.items !== undefined
-                  ? Array.isArray(incoming.items)
-                    ? incoming.items
-                    : existing.items ?? []
-                  : existing.items ?? [],
-              user_name:
-                incoming.user_id !== undefined
-                  ? incoming.user_id === currentUserId
-                    ? "You"
-                    : incoming.user_id
-                  : existing.user_name,
-              // ensure assigning flag preserved / recalculated
-              assigning: computeAssigning(existing, incoming),
-            }
-          : {
-              id,
-              user_id: incoming.user_id ?? (incoming as any).userId ?? "unknown",
-              user_name:
-                (incoming.user_id ?? (incoming as any).userId) === currentUserId
-                  ? "You"
-                  : incoming.user_id ?? (incoming as any).userId ?? "unknown",
-              items: Array.isArray(incoming.items) ? incoming.items : [],
-              total:
-                typeof incoming.total === "number"
-                  ? incoming.total
-                  : incoming.total
-                  ? Number(incoming.total)
-                  : 0,
-              status: (incoming.status as OrderStatus) ?? "pending",
-              driver_id: incoming.driver_id ?? null,
-              assigning: computeAssigning(undefined, incoming),
-              ...incoming,
-            };
+      const merged: Order = existing
+        ? { ...existing, ...incoming, items: incoming.items ?? existing.items ?? [], user_name: incoming.user_id ? (incoming.user_id === currentUserId ? "You" : incoming.user_id) : existing.user_name, assigning: computeAssigning(existing, incoming) }
+        : { id, user_id: incoming.user_id ?? "unknown", user_name: incoming.user_id === currentUserId ? "You" : incoming.user_id ?? "unknown", items: incoming.items ?? [], total: Number(incoming.total ?? 0), status: incoming.status ?? "pending", driver_id: incoming.driver_id ?? null, assigning: computeAssigning(undefined, incoming), ...incoming };
 
       map.set(id, merged);
-
-      // keep new ones at front, preserve previous order for existing
       const prevIds = new Set(prev.map((p) => p.id));
       const all = Array.from(map.values());
-
-      const newOnes: Order[] = [];
-      const existingOnes: Order[] = [];
-      for (const o of all) {
-        if (!prevIds.has(o.id)) newOnes.push(o);
-        else existingOnes.push(o);
-      }
+      const newOnes: Order[] = [], existingOnes: Order[] = [];
+      for (const o of all) prevIds.has(o.id) ? existingOnes.push(o) : newOnes.push(o);
       const orderedExisting = prev.map((p) => map.get(p.id)).filter(Boolean) as Order[];
-
       return [...newOnes.reverse(), ...orderedExisting];
     },
     [currentUserId]
   );
 
-  // ---------- WebSocket handler (with assigning notifications) ----------
-  useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token) return;
+  // ---------- WebSocket ----------
+  // ---------- WebSocket ----------
+useEffect(() => {
+  const token = localStorage.getItem("token");
+  if (!token) return;
 
-    const WS_URL = `${BASE_URL.replace(/^http/, "ws")}/ws/orders?token=${token}`;
-    let stopped = false;
+  const WS_URL = `${BASE_URL.replace(/^http/, "ws")}/ws/orders?token=${token}`;
+  let stopped = false;
 
-    const connect = () => {
-      if (stopped) return;
-      const ws = new WebSocket(WS_URL);
-      wsRef.current = ws;
+  const connect = () => {
+    if (stopped) return;
+    const ws = new WebSocket(WS_URL);
+    wsRef.current = ws;
 
-      ws.onopen = () => console.log("[WS] Connected");
-      ws.onclose = () => {
-        console.warn("[WS] Disconnected — reconnecting in 5s...");
-        setTimeout(() => {
-          if (!stopped) connect();
-        }, 5000);
-      };
-      ws.onerror = (err) => console.error("[WS] Error", err);
+    ws.onopen = () => console.log("[WS] Connected");
+    ws.onclose = () => setTimeout(() => !stopped && connect(), 5000);
+    ws.onerror = (err) => console.error("[WS] Error", err);
 
-      ws.onmessage = async (msg) => {
-        console.log("🔥 RAW WS MESSAGE:", msg.data);
-        if (!msg.data) return;
+    ws.onmessage = async (msg) => {
+  if (!msg.data) return;
+  let parsed: any;
+  try { parsed = JSON.parse(msg.data); } catch { return; }
 
-        let parsed: RawEvent | null = null;
-        try {
-          parsed = JSON.parse(msg.data);
-        } catch (err) {
-          console.error("[WS] Invalid JSON:", msg.data);
-          return;
-        }
+  const eventType = (parsed?.event_type ?? parsed?.event ?? parsed?.type ?? "").toLowerCase();
+  const payload = parsed?.payload ?? parsed?.data ?? parsed ?? {};
+  const orderId = normalizeId(payload) ?? normalizeId(parsed) ?? payload?.order_id ?? payload?.id ?? null;
+  if (!eventType || !orderId) return;
 
-        const eventType = (
-          parsed?.event_type ??
-          parsed?.event ??
-          parsed?.type ??
-          ""
-        ).toLowerCase();
+  const payloadIsPartial = !payload.user_id || !Array.isArray(payload.items) || payload.items.length === 0 || typeof payload.total !== "number";
+  const resolveAuthoritative = async (): Promise<Order | null> => {
+    if (!payloadIsPartial) return { ...(payload as any), id: orderId, items: Array.isArray(payload.items) ? payload.items : [] } as Order;
+    return await fetchSingleOrder(orderId);
+  };
 
-        const payload = parsed?.payload ?? parsed?.data ?? parsed ?? {};
-        const orderId = normalizeId(payload) ?? normalizeId(parsed) ?? payload?.order_id ?? payload?.id ?? null;
+  try {
+    const authoritative = await resolveAuthoritative();
+    if (!authoritative) return;
 
-        if (!eventType || !orderId) {
-          // missing order id: ignore
-          return;
-        }
+    setOrders((prev) => upsertOrderPure(prev, authoritative));
 
-        // detect partial payloads
-        const payloadIsPartial =
-          !payload.user_id ||
-          !Array.isArray(payload.items) ||
-          payload.items.length === 0 ||
-          typeof payload.total !== "number";
+    // ---------- TOASTS ----------
 
-        const resolveAuthoritative = async (): Promise<Order | null> => {
-          if (!payloadIsPartial) {
-            return { ...(payload as any), id: orderId, items: Array.isArray(payload.items) ? payload.items : [] } as Order;
-          }
-          const full = await fetchSingleOrder(orderId);
-          if (full) return full;
-          return null;
-        };
-
-        try {
-          // order.created
-          if (eventType.startsWith("order.created") || eventType.startsWith("order_create") || eventType.startsWith("order.create")) {
-            const authoritative = await resolveAuthoritative();
-            if (!authoritative) {
-              console.warn("[WS] Ignoring partial order.created (no authoritative data)", payload);
-              return;
-            }
-
-            setOrders((prev) => upsertOrderPure(prev, authoritative));
-
-            // toast new order for owner or everyone (small info)
-            if (!recentlyCreated.current.has(orderId)) {
-              if (authoritative.user_id === currentUserId) {
-                toast.info(`🆕 You created order ${orderId}`);
-              } else {
-                toast.info(`🆕 New order: ${orderId}`);
-              }
-            }
-            recentlyCreated.current.add(orderId);
-            setTimeout(() => recentlyCreated.current.delete(orderId), 60_000);
-            return;
-          }
-
-          // order.updated
-          if (eventType.startsWith("order.updated") || eventType.startsWith("order_update") || eventType.startsWith("order.update")) {
-            const authoritative = await resolveAuthoritative();
-
-            if (authoritative) {
-              // We have full authoritative order
-              setOrders((prev) => {
-                const before = prev.find((p) => p.id === orderId);
-                const afterArr = upsertOrderPure(prev, authoritative);
-                // detect payment transition -> toast
-                if (before && before.status !== "paid" && authoritative.status === "paid") {
-                  if (!recentlyPaid.current.has(orderId)) {
-                    if (authoritative.user_id === currentUserId) {
-                      toast.success(`💳 Payment successful for your order ${orderId}`);
-                    } else {
-                      toast.success(`💳 Payment successful for order ${orderId}`);
-                    }
-                    recentlyPaid.current.add(orderId);
-                    setTimeout(() => recentlyPaid.current.delete(orderId), 60_000);
-                  }
-                  // if paid and no driver -> show assigning toast (only for owner)
-                  if (!authoritative.driver_id && authoritative.user_id === currentUserId) {
-                    if (!recentlyAssigning.current.has(orderId)) {
-                      toast.info(`🔎 Assigning driver for your order ${orderId}…`);
-                      recentlyAssigning.current.add(orderId);
-                      setTimeout(() => recentlyAssigning.current.delete(orderId), 60_000);
-                    }
-                  }
-                }
-                return afterArr;
-              });
-
-              return;
-            }
-
-            // authoritative fetch failed -> merge partial only if exists locally
-            setOrders((prev) => {
-              const exists = prev.some((p) => p.id === orderId);
-              if (!exists) {
-                console.warn("[WS] Ignoring partial update for unknown order", payload);
-                return prev;
-              }
-
-              const incoming: Partial<Order> & { id: string } = { id: orderId, ...(payload || {}) };
-              const newArr = upsertOrderPure(prev, incoming);
-
-              // detect transitions
-              const before = prev.find((p) => p.id === orderId)!;
-              const after = newArr.find((p) => p.id === orderId)!;
-              if (before.status !== "paid" && after.status === "paid") {
-                if (!recentlyPaid.current.has(orderId)) {
-                  if (after.user_id === currentUserId) {
-                    toast.success(`💳 Payment successful for your order ${orderId}`);
-                  } else {
-                    toast.success(`💳 Payment successful for order ${orderId}`);
-                  }
-                  recentlyPaid.current.add(orderId);
-                  setTimeout(() => recentlyPaid.current.delete(orderId), 60_000);
-                }
-                if (!after.driver_id && after.user_id === currentUserId && !recentlyAssigning.current.has(orderId)) {
-                  toast.info(`🔎 Assigning driver for your order ${orderId}…`);
-                  recentlyAssigning.current.add(orderId);
-                  setTimeout(() => recentlyAssigning.current.delete(orderId), 60_000);
-                }
-              }
-
-              return newArr;
-            });
-
-            return;
-          }
-
-          // driver.assigned
-          if (eventType.startsWith("driver.assigned") || eventType.includes("driver_assigned")) {
-            // prefer authoritative if available
-            const authoritative = await resolveAuthoritative();
-
-            if (authoritative) {
-              setOrders((prev) => {
-                const incoming: Partial<Order> & { id: string } = {
-                  ...authoritative,
-                  driver_id: payload.driver_id ?? payload.driverId ?? authoritative.driver_id,
-                  status: authoritative.status === "paid" ? "paid" : "assigned",
-                  assigning: false,
-                };
-                const newArr = upsertOrderPure(prev, incoming);
-
-                // toast for owner
-                if (!recentlyAssigned.current.has(orderId)) {
-                  if (incoming.user_id === currentUserId || authoritative.user_id === currentUserId) {
-                    toast.success(`🚗 Driver assigned to your order ${orderId}`);
-                  } else {
-                    toast.info(`🚗 Driver assigned to order ${orderId}`);
-                  }
-                  recentlyAssigned.current.add(orderId);
-                  setTimeout(() => recentlyAssigned.current.delete(orderId), 60_000);
-                }
-
-                return newArr;
-              });
-
-              return;
-            }
-
-            // authoritative missing -> merge partial
-            setOrders((prev) => {
-              const exists = prev.some((p) => p.id === orderId);
-              if (!exists) {
-                console.warn("[WS] Ignoring driver.assigned for unknown order", payload);
-                return prev;
-              }
-
-              const incoming: Partial<Order> & { id: string } = {
-                id: orderId,
-                driver_id: payload.driver_id ?? payload.driverId,
-                status: "assigned",
-                assigning: false,
-              };
-              const newArr = upsertOrderPure(prev, incoming);
-
-              if (!recentlyAssigned.current.has(orderId)) {
-                const owner = newArr.find((p) => p.id === orderId)?.user_id;
-                if (owner === currentUserId) {
-                  toast.success(`🚗 Driver assigned to your order ${orderId}`);
-                } else {
-                  toast.info(`🚗 Driver assigned to order ${orderId}`);
-                }
-                recentlyAssigned.current.add(orderId);
-                setTimeout(() => recentlyAssigned.current.delete(orderId), 60_000);
-              }
-
-              return newArr;
-            });
-
-            return;
-          }
-
-          // order.deleted
-          if (eventType.startsWith("order.deleted") || eventType.startsWith("order_deleted")) {
-            setOrders((prev) => prev.filter((o) => o.id !== orderId));
-            toast.warn(`🗑 Order ${orderId} deleted`);
-            return;
-          }
-        } catch (err) {
-          console.error("[WS] handler error:", err);
-        }
-      };
-    };
-
-    connect();
-
-    return () => {
-      stopped = true;
-      wsRef.current?.close();
-    };
-  }, [BASE_URL, fetchSingleOrder, upsertOrderPure]);
-
-  // ---------- handlers: edit / payment / create / delete ----------
-  const handleEdit = (order: Order) => {
-    if (!isAdmin && order.user_id !== currentUserId) {
-      toast.error("You can only edit your own orders");
+    // New order
+    if (eventType.startsWith("order.created") || eventType.includes("order_create") || eventType.includes("order.create")) {
+      if (!recentlyCreated.current.has(orderId)) {
+        toast.info(authoritative.user_id === currentUserId 
+          ? `🆕 You created order ${orderId}` 
+          : `🆕 New order: ${orderId}`);
+        recentlyCreated.current.add(orderId);
+        setTimeout(() => recentlyCreated.current.delete(orderId), 60_000);
+      }
       return;
     }
-    setForm({
-      user_id: order.user_id,
-      items: Array.isArray(order.items) ? order.items : [],
-      driver_id: order.driver_id ?? "",
-      status: order.status,
-    });
+
+    // Order updated / paid
+    if (eventType.startsWith("order.updated") || eventType.includes("order_update") || eventType.includes("order.update")) {
+      const before = orders.find((o) => o.id === orderId);
+      if (before && before.status !== "paid" && authoritative.status === "paid") {
+        if (!recentlyPaid.current.has(orderId)) {
+          toast.success(authoritative.user_id === currentUserId
+            ? `💳 Payment successful for your order ${orderId}`
+            : `💳 Payment successful for order ${orderId}`);
+          recentlyPaid.current.add(orderId);
+          setTimeout(() => recentlyPaid.current.delete(orderId), 60_000);
+        }
+      }
+
+      // Paid but no driver
+      if (authoritative.status === "paid" && !authoritative.driver_id && !recentlyAssigning.current.has(orderId)) {
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.id === orderId ? { ...o, assigning: true } : o
+          )
+        );
+
+        const driversAvailable = payload.drivers_available ?? true; // adjust if backend provides
+        if (driversAvailable) {
+          toast.info(`🔎 Assigning driver for your order ${orderId}…`);
+        } else {
+          toast.warn(`⚠️ No drivers available for your order ${orderId} at the moment`);
+        }
+
+        recentlyAssigning.current.add(orderId);
+        setTimeout(() => recentlyAssigning.current.delete(orderId), 60_000);
+      }
+      return;
+    }
+
+    // Driver assigned
+    if (eventType.startsWith("driver.assigned") || eventType.includes("driver_assigned")) {
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId ? { ...o, assigning: false } : o
+        )
+      );
+
+      if (!recentlyAssigned.current.has(orderId)) {
+        toast.success(authoritative.user_id === currentUserId
+          ? `🚗 Driver assigned to your order ${orderId}`
+          : `🚗 Driver assigned to order ${orderId}`);
+        recentlyAssigned.current.add(orderId);
+        setTimeout(() => recentlyAssigned.current.delete(orderId), 60_000);
+      }
+      return;
+    }
+
+    // Driver pending (no drivers yet)
+    if (eventType === "driver.pending") {
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId ? { ...o, assigning: true } : o
+        )
+      );
+
+      if (payload.reason === "no drivers available") {
+        toast.warn(`⚠️ No drivers currently available for order ${orderId}`);
+      }
+      return;
+    }
+
+    // Driver failed (assignment failed after retries)
+    if (eventType === "driver.failed") {
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId ? { ...o, assigning: false } : o
+        )
+      );
+      toast.error(`❌ Driver assignment failed for order ${orderId} after retries`);
+      return;
+    }
+
+    // Order deleted
+    if (eventType.startsWith("order.deleted") || eventType.includes("order_deleted")) {
+      toast.warn(`🗑 Order ${orderId} deleted`);
+      return;
+    }
+
+  } catch (err) {
+    console.error("[WS] handler error:", err);
+  }
+};
+
+  };
+
+  connect();
+  return () => { stopped = true; wsRef.current?.close(); };
+}, [BASE_URL, fetchSingleOrder, upsertOrderPure, orders, currentUserId]);
+
+
+  // ---------- handlers ----------
+  const handleEdit = (order: Order) => {
+    if (!isAdmin && order.user_id !== currentUserId) { toast.error("You can only edit your own orders"); return; }
+    setForm({ user_id: order.user_id, items: Array.isArray(order.items) ? order.items : [], driver_id: order.driver_id ?? "", status: order.status });
     setEditingId(order.id);
     setShowModal(true);
   };
 
   const handlePayment = (order: Order) => {
-    if (!isAdmin && order.user_id !== currentUserId) {
-      toast.error("You can only pay for your own orders");
-      return;
-    }
+    if (!isAdmin && order.user_id !== currentUserId) { toast.error("You can only pay for your own orders"); return; }
     setSelectedOrder(order);
     setShowPaymentModal(true);
   };
 
   const handleSubmit = async () => {
-    if (!form.user_id || form.items.length === 0) {
-      toast.error("Please provide user ID and select items");
-      return;
-    }
-
+    if (!form.user_id || form.items.length === 0) { toast.error("Please provide user ID and select items"); return; }
     const total = MENU_ITEMS.filter((i) => form.items.includes(i.name)).reduce((sum, i) => sum + i.price, 0);
     setLoading(true);
 
     try {
       if (editingId) {
         const res = await api.put<Order>(`/orders/orders/${editingId}`, { ...form, total });
-        setOrders((prev) => prev.map((o) => (o.id === editingId ? { ...res.data, items: Array.isArray(res.data.items) ? res.data.items : [] } : o)));
+        setOrders((prev) => prev.map((o) => o.id === editingId ? { ...res.data, items: Array.isArray(res.data.items) ? res.data.items : [] } : o));
         toast.success("Order updated successfully");
       } else {
         const payload = { ...form, total, user_id: form.user_id || currentUserId || "" };
         const res = await api.post<Order>("/orders/orders", payload);
-
         setOrders((prev) => upsertOrderPure(prev, { ...(res.data as Order), id: res.data.id }));
         recentlyCreated.current.add(res.data.id);
         toast.success("Order created successfully");
-
         setSelectedOrder(res.data);
         setShowPaymentModal(true);
       }
@@ -515,29 +324,15 @@ export default function Orders() {
       setShowModal(false);
       setEditingId(null);
       setForm({ user_id: currentUserId ?? "", items: [], driver_id: "", status: "pending" });
-    } catch (err) {
-      console.error("Submit error:", err);
-      toast.error(editingId ? "Failed to update order" : "Failed to create order");
-    } finally {
-      setLoading(false);
-    }
+    } catch { toast.error(editingId ? "Failed to update order" : "Failed to create order"); }
+    finally { setLoading(false); }
   };
 
   const handleDelete = async (id: string, ownerId?: string) => {
-    if (!isAdmin && ownerId !== currentUserId) {
-      toast.error("You can only delete your own orders");
-      return;
-    }
+    if (!isAdmin && ownerId !== currentUserId) { toast.error("You can only delete your own orders"); return; }
     if (!confirm("Delete this order?")) return;
-
-    try {
-      await api.delete(`/orders/orders/${id}`);
-      setOrders((prev) => prev.filter((o) => o.id !== id));
-      toast.success("Order deleted successfully");
-    } catch (err) {
-      console.error("Delete error:", err);
-      toast.error("Failed to delete order");
-    }
+    try { await api.delete(`/orders/orders/${id}`); setOrders((prev) => prev.filter((o) => o.id !== id)); toast.success("Order deleted successfully"); }
+    catch { toast.error("Failed to delete order"); }
   };
 
   // ---------- render ----------
@@ -546,87 +341,14 @@ export default function Orders() {
       <ToastContainer position="top-right" />
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-3xl font-bold">🧾 Orders</h1>
-        <Button
-          onClick={() => {
-            setForm({ user_id: currentUserId ?? "", items: [], driver_id: "", status: "pending" });
-            setEditingId(null);
-            setShowModal(true);
-          }}
-        >
+        <Button onClick={() => { setForm({ user_id: currentUserId ?? "", items: [], driver_id: "", status: "pending" }); setEditingId(null); setShowModal(true); }}>
           ➕ Create Order
         </Button>
       </div>
 
-      <div className="grid gap-3">
-        {orders.length === 0 ? (
-          <p>No orders found</p>
-        ) : (
-          orders.map((order) => (
-            <div key={order.id} className="border rounded-lg p-4 bg-white shadow">
-              <p><strong>User:</strong> {order.user_name || order.user_id}</p>
-              <p><strong>Items:</strong> {safeItemsToString(order.items)}</p>
-              <p><strong>Total:</strong> ${typeof order.total === "number" ? order.total.toFixed(2) : Number(order.total || 0).toFixed(2)}</p>
-              <p>
-                <strong>Status:</strong>{" "}
-                <span className={`font-semibold ${
-                  order.status === "pending" ? "text-yellow-600" :
-                  order.status === "paid" ? "text-blue-600" :
-                  order.status === "assigned" ? "text-purple-600" : "text-green-600"
-                }`}>
-                  {order.status}
-                </span>
-                {/* Inline spinner + subtle text when paid but driver not yet assigned */}
-                {order.status === "paid" && !order.driver_id && (
-                  <span className="ml-3 inline-flex items-center text-sm text-gray-600">
-                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
-                    </svg>
-                    Assigning driver…
-                  </span>
-                )}
-              </p>
-              <p><strong>Driver:</strong> {order.driver_id ?? "Unassigned"}</p>
+      <OrderList orders={orders} onEdit={handleEdit} onPay={handlePayment} onDelete={handleDelete} />
 
-              <div className="flex gap-2 mt-3">
-                <Button onClick={() => handleEdit(order)} disabled={["assigned", "delivered"].includes(order.status)}>✏️ Edit</Button>
-                {order.status === "pending" && <Button onClick={() => handlePayment(order)}>💳 Pay Now</Button>}
-                <Button variant="danger" onClick={() => handleDelete(order.id, order.user_id)}>🗑 Delete</Button>
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-
-      <Modal show={showModal} onClose={() => setShowModal(false)} title={editingId ? "Edit Order" : "Create New Order"}>
-        <input
-          type="text"
-          placeholder="User ID"
-          value={form.user_id}
-          onChange={(e) => setForm({ ...form, user_id: e.target.value })}
-          className="border p-2 w-full mb-3 rounded"
-          disabled={!isAdmin}
-        />
-        <div className="grid grid-cols-2 gap-2 mb-3">
-          {MENU_ITEMS.map((item) => (
-            <button
-              key={item.name}
-              onClick={() =>
-                setForm((prev) => ({
-                  ...prev,
-                  items: prev.items.includes(item.name)
-                    ? prev.items.filter((i) => i !== item.name)
-                    : [...prev.items, item.name],
-                }))
-              }
-              className={`border rounded p-2 text-sm ${form.items.includes(item.name) ? "bg-green-500 text-white" : "bg-gray-100"}`}
-            >
-              {item.name} – ${item.price}
-            </button>
-          ))}
-        </div>
-        <Button onClick={handleSubmit} loading={loading} className="w-full">{editingId ? "Update Order" : "Create Order"}</Button>
-      </Modal>
+      <OrderModal show={showModal} onClose={() => setShowModal(false)} form={form} setForm={setForm} onSubmit={handleSubmit} loading={loading} editingId={editingId} isAdmin={isAdmin} />
 
       {selectedOrder && (
         <PaymentModal show={showPaymentModal} onClose={() => setShowPaymentModal(false)} orderId={selectedOrder.id} amount={selectedOrder.total} />

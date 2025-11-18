@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import uuid
+import random
 import aioboto3
 from dotenv import load_dotenv
 
@@ -8,113 +10,133 @@ from database import database
 from events import publish_event, log_event_to_db
 from assignment import choose_available_driver
 from models import drivers
-import random
 
 load_dotenv()
 
 USE_AWS = os.getenv("USE_AWS", "False").lower() == "true"
-
 ORDER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
 PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 session = aioboto3.Session()
 
-async def release_driver_later(driver_id: str, min_minutes=20, max_minutes=25):
-    # Pick a random duration in seconds
+
+# ───────────────────────────────────────────────
+# AUTO RELEASE DRIVER (after delivery)
+# ───────────────────────────────────────────────
+async def release_driver_later(driver_id: str, min_minutes=5, max_minutes=7):
     delay = random.randint(min_minutes * 60, max_minutes * 60)
+    print(f"[DriverService] ⏳ Driver {driver_id} will be released in {delay}s")
+
     await asyncio.sleep(delay)
 
-    # Set driver back to available
     await database.execute(
         drivers.update()
-        .where(drivers.c.id == driver_id)
-        .values(status="available")
+            .where(drivers.c.id == driver_id)
+            .values(status="available")
     )
-    print(f"[DriverService] 🔄 Driver {driver_id} is now AVAILABLE again")
+
+    print(f"[DriverService] 🟢 Driver {driver_id} is AVAILABLE again")
+
+    await publish_event(
+        "driver.available",
+        {
+            "event_id": str(uuid.uuid4()),
+            "driver_id": driver_id,
+            "reason": "auto-release"
+        }
+    )
+
+
 # ───────────────────────────────────────────────
-# HANDLE DRIVER ASSIGNMENT
-# ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# HANDLE DRIVER ASSIGNMENT (with retry & pending)
+# MAIN DRIVER ASSIGNMENT LOGIC
 # ───────────────────────────────────────────────
 async def handle_driver_assignment(event_data: dict, max_retries: int = 3, retry_delay: int = 5):
-    order_id = event_data["order_id"]
+    order_id = event_data.get("order_id")
     user_id = event_data.get("user_id")
-    print(f"\n[DriverService] 🔎 Attempting driver assignment for order {order_id}")
 
-    # Check if order is PAID
+    print(f"\n[DriverService] 🚕 Assigning driver for order {order_id}")
+
+    # Ignore unpaid orders
     if event_data.get("status", "").lower() != "paid":
-        print(f"[DriverService] 📝 Order {order_id} not paid yet → skipping assignment")
+        print(f"[DriverService] ❌ Order {order_id} not paid — skipping")
         return
 
-    # Attempt to pick an available driver with retries
     retries = 0
     driver = await choose_available_driver()
+
     while not driver and retries < max_retries:
-        print(f"[DriverService] ⚠ No available drivers for order {order_id}, retrying in {retry_delay}s...")
+        print(f"[DriverService] ⚠ No drivers for {order_id}, retrying...")
+
         await publish_event(
             "driver.pending",
-            {"order_id": order_id, "reason": "no drivers available"}
+            {
+                "event_id": str(uuid.uuid4()),
+                "order_id": order_id,
+                "reason": "no drivers available"
+            }
         )
+
         await asyncio.sleep(retry_delay)
         driver = await choose_available_driver()
         retries += 1
 
     if not driver:
-        print(f"[DriverService] ❌ Still no available drivers after {max_retries} retries for order {order_id}")
+        print(f"[DriverService] ❌ Final fail: no drivers for {order_id}")
         await publish_event(
             "driver.failed",
-            {"order_id": order_id, "reason": "no drivers available after retries"}
+            {
+                "event_id": str(uuid.uuid4()),
+                "order_id": order_id,
+                "reason": "no drivers after retries"
+            }
         )
         return
 
     driver_id = driver["id"]
-    print(f"[DriverService] 👨‍✈️ Selected driver {driver_id} for order {order_id}")
+    print(f"[DriverService] 🟦 Driver {driver_id} assigned to order {order_id}")
 
-    # Mark driver busy
     await database.execute(
         drivers.update()
-        .where(drivers.c.id == driver_id)
-        .values(status="busy")
+            .where(drivers.c.id == driver_id)
+            .values(status="busy")
     )
-    print(f"[DriverService] 🔄 Updated driver DB → {driver_id} = busy")
 
-    # Schedule automatic release after 20–25 minutes
+    print(f"[DriverService] 🔵 Driver {driver_id} marked BUSY")
+
     asyncio.create_task(release_driver_later(driver_id))
 
-    # Save event for idempotency
     await log_event_to_db(
         "driver.assigned",
         {"order_id": order_id, "driver_id": driver_id},
         "driver-service"
     )
 
-    # Emit event to SQS
-    print(f"[DriverService] 📤 Publishing driver.assigned → order {order_id}")
     await publish_event(
         "driver.assigned",
         {
+            "event_id": str(uuid.uuid4()),
             "order_id": order_id,
             "driver_id": driver_id,
             "user_id": user_id
         }
     )
 
-    print(f"[DriverService] ✅ Driver assignment completed for order {order_id}\n")
+    print(f"[DriverService] ✅ Done assigning driver for {order_id}\n")
+
 
 # ───────────────────────────────────────────────
-# POLL SQS QUEUE
+# SQS POLLING
 # ───────────────────────────────────────────────
 async def poll_queue(queue_url: str, label: str):
     if not USE_AWS:
-        print(f"[Driver Consumer] LOCAL MODE (no AWS) → {label} disabled")
+        print(f"[DriverService] LOCAL MODE → skipping queue {label}")
         while True:
             await asyncio.sleep(10)
         return
 
     async with session.client("sqs", region_name=AWS_REGION) as sqs:
-        print(f"[Driver Consumer] 📨 Listening on {label}: {queue_url}")
+        print(f"[DriverService] 📡 Listening on {label}")
 
         while True:
             try:
@@ -126,41 +148,35 @@ async def poll_queue(queue_url: str, label: str):
                 messages = response.get("Messages", [])
 
                 for msg in messages:
-                    print(f"\n[DriverService] 📥 Message received from {label}")
+                    raw = json.loads(msg["Body"])
 
-                    body = json.loads(msg["Body"])
-                    # --- Support both old and new event formats ---
-                    event_type = body.get("event_type") or body.get("type")
-                    data = body.get("payload") or body.get("data") or {}
+                    # SNS wrapper?
+                    if "Message" in raw:
+                        raw = json.loads(raw["Message"])
 
-                    print(f"[DriverService] 🔎 Event type: {event_type}")
-                    print(f"[DriverService] 🔍 Event data: {data}")
+                    event_type = raw.get("event_type") or raw.get("type")
+                    data = raw.get("data") or raw.get("payload") or raw
 
-                    # Idempotency check
+                    print(f"\n[DriverService] 📥 Received {event_type}")
+                    print(f"[DriverService] 🔍 {data}")
+
                     processed = await log_event_to_db(event_type, data, "driver-service")
                     if not processed:
-                        print(f"[DriverService] ⏭ Skipping duplicate {event_type}")
-                        await sqs.delete_message(
-                            QueueUrl=queue_url,
-                            ReceiptHandle=msg["ReceiptHandle"]
-                        )
+                        print(f"[DriverService] ⏭ Duplicate skipped")
+                        await sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
                         continue
 
-                    # Route events → all events go through driver assignment logic
-                    if event_type in ("order.created", "order.updated", "payment.completed"):
+                    if event_type in ("order.updated", "payment.completed"):
                         await handle_driver_assignment(data)
+                    elif event_type.startswith("driver."):
+                        print("[DriverService] 📘 Driver event acknowledged")
                     else:
                         print(f"[DriverService] ⚠ Unknown event: {event_type}")
 
-                    # Delete message from SQS
-                    await sqs.delete_message(
-                        QueueUrl=queue_url,
-                        ReceiptHandle=msg["ReceiptHandle"]
-                    )
-                    print(f"[DriverService] 🗑 Message deleted from SQS\n")
+                    await sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
 
             except Exception as e:
-                print(f"[Driver Consumer ERROR] {label}: {e}")
+                print(f"[DriverService] ❌ Queue error on {label}: {e}")
                 await asyncio.sleep(5)
 
 

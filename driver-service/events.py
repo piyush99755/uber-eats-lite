@@ -23,8 +23,40 @@ EVENT_BUS = os.getenv("EVENT_BUS_NAME")
 
 session = aioboto3.Session()
 
-async def publish_event(event_type: str, data: dict):
-    """Publish an event to AWS SQS/EventBridge."""
+# Global WebSocket broadcast registry (inject this from your WS server)
+websocket_clients = set()
+
+async def register_ws_client(ws):
+    """Add WebSocket client to broadcast set."""
+    websocket_clients.add(ws)
+
+async def unregister_ws_client(ws):
+    """Remove WebSocket client from broadcast set."""
+    websocket_clients.discard(ws)
+
+async def broadcast_ws_event(event_type: str, data: dict):
+    """Send an event to all connected WebSocket clients."""
+    message = json.dumps({
+        "event_type": event_type,
+        "payload": data,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    to_remove = set()
+    for ws in websocket_clients:
+        try:
+            await ws.send(message)
+        except Exception as e:
+            logger.warning(f"[WS BROADCAST] Failed to send to a client: {e}")
+            to_remove.add(ws)
+    # Clean up disconnected clients
+    for ws in to_remove:
+        websocket_clients.discard(ws)
+
+async def publish_event(event_type: str, data: dict, broadcast_ws: bool = True):
+    """
+    Publish an event to AWS SQS/EventBridge.
+    Optionally broadcast to WebSocket clients.
+    """
     event_time = datetime.utcnow().isoformat()
     message_body = {
         "type": event_type,
@@ -33,7 +65,11 @@ async def publish_event(event_type: str, data: dict):
         "timestamp": event_time,
     }
 
-    # Local testing
+    # Broadcast over WS first (so local dev can see immediately)
+    if broadcast_ws:
+        await broadcast_ws_event(event_type, data)
+
+    # Local testing without AWS
     if not USE_AWS:
         print(f"[LOCAL EVENT] {event_type}: {json.dumps(data, indent=2)}")
         return
@@ -42,7 +78,7 @@ async def publish_event(event_type: str, data: dict):
         async with session.client("sqs", region_name=AWS_REGION) as sqs, \
                    session.client("events", region_name=AWS_REGION) as eventbridge:
 
-            # Send event to relevant queues
+            # Send event to queues
             for queue_name, queue_url in [
                 ("Order Service", ORDER_QUEUE_URL),
                 ("Notification Service", NOTIFICATION_QUEUE_URL),
@@ -59,7 +95,7 @@ async def publish_event(event_type: str, data: dict):
                 except Exception as e:
                     logger.warning(f"[FAILED → {queue_name}] {e}")
 
-            # Publish to EventBridge (optional)
+            # EventBridge publish
             if EVENT_BUS:
                 try:
                     await eventbridge.put_events(
@@ -86,14 +122,14 @@ async def log_event_to_db(event_type: str, data: dict, source_service: str):
     event_id = data.get("id") or data.get("event_id")
     if not event_id:
         # If no id, still log for visibility but skip dedup logic
-        print(f"[WARN] Event missing ID → {event_type}")
+        logger.warning(f"[WARN] Event missing ID → {event_type}")
         return True
 
     # Check if event_id already exists
     query_check = processed_events.select().where(processed_events.c.event_id == event_id)
     existing = await database.fetch_one(query_check)
     if existing:
-        print(f"[SKIP] Duplicate event detected ({event_id}) in {source_service}")
+        logger.info(f"[SKIP] Duplicate event detected ({event_id}) in {source_service}")
         return False
 
     # Log new event
@@ -104,5 +140,5 @@ async def log_event_to_db(event_type: str, data: dict, source_service: str):
         processed_at=datetime.utcnow(),
     )
     await database.execute(query_insert)
-    print(f"[LOGGED] {event_type} ({event_id}) from {source_service}")
+    logger.info(f"[LOGGED] {event_type} ({event_id}) from {source_service}")
     return True
