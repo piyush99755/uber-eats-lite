@@ -4,7 +4,7 @@ from typing import Optional
 
 class DriverBase(BaseModel):
     name: str
-    vehicle_type: str
+    vehicle: str         
     license_number: str
 
 class DriverCreate(DriverBase):
@@ -12,15 +12,10 @@ class DriverCreate(DriverBase):
 
 class Driver(DriverBase):
     id: str
+    status: str           
 
     class Config:
-        orm_mode = True
-
-class NotificationCreate(BaseModel):
-    driver_id: str
-    title: str
-    message: str
-
-class Notification(NotificationCreate):
-    id: Optional[str] = None
-    created_at: Optional[datetime] = None
+        orm_mode = True#
+        
+class VehicleUpdate(BaseModel):
+    vehicle: str

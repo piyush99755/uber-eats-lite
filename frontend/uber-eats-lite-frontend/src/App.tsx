@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import Dashboard from "./pages/Dashboard";
+
 import Orders from "./pages/Orders";
 import Users from "./pages/Users";
 import Drivers from "./pages/Drivers";
@@ -9,6 +9,8 @@ import Events from "./pages/Events";
 import Login from "./components/Login";
 import Signup from "./components/Signup";
 import Sidebar from "./components/Sidebar";
+import DriverOrders from "./pages/DriverOrders";
+import DriverProfile from "./pages/DriverProfile";
 import api from "./api/api";
 
 export default function App() {
@@ -53,26 +55,47 @@ export default function App() {
       ) : (
         <div className="flex min-h-screen bg-gray-50">
           <Sidebar role={role} onLogout={handleLogout} />
+
           <main className="flex-1 p-6 overflow-auto">
             <Routes>
-              <Route path="/" element={<Dashboard />} />
+          {/* Redirect root based on role */}
+          <Route
+            path="/"
+            element={
+              role === "driver"
+                ? <Navigate to="/driver/orders" replace />
+                : role === "admin"
+                ? <Navigate to="/users" replace />
+                : <Navigate to="/orders" replace />
+            }
+          />
 
-              {/* Accessible to both user & admin */}
+          {/* USER ROUTES */}
+          {role === "user" && (
+            <>
               <Route path="/orders" element={<Orders />} />
               <Route path="/payments" element={<Payments />} />
+            </>
+          )}
 
-              {/* Admin-only routes */}
-              {role === "admin" && (
-                <>
-                  <Route path="/users" element={<Users />} />
-                  <Route path="/drivers" element={<Drivers />} />
-                  <Route path="/events" element={<Events />} />
-                </>
-              )}
+          {/* DRIVER ROUTES */}
+          {role === "driver" && (
+            <>
+              <Route path="/driver/orders" element={<DriverOrders />} />
+              <Route path="/driver/profile" element={<DriverProfile />} />
+            </>
+          )}
 
-              {/* Catch-all redirect */}
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
+          {/* ADMIN ROUTES */}
+          {role === "admin" && (
+            <>
+              <Route path="/users" element={<Users />} />
+              <Route path="/drivers" element={<Drivers />} />
+              <Route path="/events" element={<Events />} />
+            </>
+          )}
+        </Routes>
+
           </main>
         </div>
       )}

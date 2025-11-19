@@ -23,4 +23,5 @@ botocore
 asyncpg
 psycopg2-binary
 prometheus_client
+python-jose[cryptography]
 

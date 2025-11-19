@@ -121,109 +121,211 @@ def root():
 # --------------------------------------------------
 @app.post("/signup")
 async def signup(request: Request):
-    """Forward signup to Auth Service."""
+    """
+    Handle user signup. If role == 'driver', also create a driver record.
+    """
+
     data = await request.json()
-    async with httpx.AsyncClient() as client:
+    role = data.get("role", "user")
+
+    # -------------------------
+    # Prepare payloads
+    # -------------------------
+    auth_payload = {
+        "name": data.get("name"),
+        "email": data.get("email"),
+        "password": data.get("password"),
+        "role": role
+    }
+
+    # driver-specific fields
+    vehicle = data.get("vehicle")
+    license_number = data.get("license_number")
+
+    # -------------------------
+    # 1️⃣ Create user in auth-service
+    # -------------------------
+    try:
+        async with httpx.AsyncClient() as client:
+            auth_resp = await forward_with_retries(
+                client,
+                method="POST",
+                url=f"{SERVICES['auth']}/signup",
+                json=auth_payload
+            )
+    except Exception as e:
+        logger.error(f"Signup failed (auth): {e}")
+        return Response(
+            content=json.dumps({"success": False, "message": "Auth service unavailable"}),
+            status_code=503,
+            media_type="application/json"
+        )
+
+    # propagate auth errors
+    if auth_resp.status_code >= 400:
+        return Response(
+            content=auth_resp.content,
+            status_code=auth_resp.status_code,
+            media_type=auth_resp.headers.get("content-type", "application/json")
+        )
+
+    # parse auth response
+    try:
+        auth_data = auth_resp.json()
+    except Exception:
+        auth_data = {}
+
+    user_id = auth_data.get("user_id") or auth_data.get("id")
+    token = auth_data.get("token") or auth_data.get("access_token")
+
+    # decode token if needed
+    if not user_id and token:
+        decoded = decode_jwt(token)
+        if decoded:
+            user_id = decoded.get("sub")
+
+    # -------------------------
+    # 2️⃣ Create driver record if role=driver
+    # -------------------------
+    if role == "driver":
+        # ensure required driver fields
+        if not vehicle or not license_number:
+            return Response(
+                content=json.dumps({"success": False, "message": "Missing driver fields (vehicle, license_number)"}),
+                status_code=400,
+                media_type="application/json"
+            )
+
+        driver_payload = {
+            "id": user_id or str(uuid.uuid4()),  # keep 1:1 mapping
+            "name": data.get("name"),
+            "vehicle": vehicle,
+            "license_number": license_number,
+            "status": "available"
+        }
+
         try:
-            response = await client.post(f"{SERVICES['auth']}/signup", json=data)
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                media_type=response.headers.get("content-type", "application/json"),
-            )
+            async with httpx.AsyncClient() as client:
+                driver_resp = await forward_with_retries(
+                    client,
+                    method="POST",
+                    url=f"{SERVICES['drivers'].rstrip('/')}/drivers",
+                    json=driver_payload,
+                    headers={"x-trace-id": request.state.trace_id}
+                )
         except Exception as e:
-            logger.error(f"Signup failed: {e}")
+            logger.error(f"Driver creation failed: {e}")
             return Response(
-                content=json.dumps({"success": False, "message": "Auth service unavailable"}),
-                status_code=503,
-                media_type="application/json",
+                content=json.dumps({
+                    "success": True,
+                    "warning": "User created but driver record creation failed. Please contact admin.",
+                    "auth_response": auth_data
+                }),
+                status_code=207,
+                media_type="application/json"
             )
+
+        if driver_resp.status_code >= 400:
+            logger.error(f"Driver-service returned error: {driver_resp.status_code} {driver_resp.text}")
+            driver_resp_content = driver_resp.json() if driver_resp.headers.get("content-type", "").startswith("application/json") else driver_resp.text
+            return Response(
+                content=json.dumps({
+                    "success": True,
+                    "warning": "User created but driver record creation failed.",
+                    "auth_response": auth_data,
+                    "driver_response": driver_resp_content
+                }),
+                status_code=207,
+                media_type="application/json"
+            )
+
+    # -------------------------
+    # 3️⃣ Success: return auth response
+    # -------------------------
+    return Response(
+        content=auth_resp.content,
+        status_code=auth_resp.status_code,
+        media_type=auth_resp.headers.get("content-type", "application/json")
+    )
+
 
 
 @app.post("/login")
 async def login(request: Request):
-    """Forward login to Auth Service."""
+    """
+    Forward login request to auth-service. If user is a driver,
+    fetch driver record from driver-service and include it in the response.
+    """
     data = await request.json()
+    trace_id = request.headers.get("x-trace-id") or str(uuid.uuid4())
+
+    # 1️⃣ Forward login to auth-service
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post(f"{SERVICES['auth']}/login", json=data)
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                media_type=response.headers.get("content-type", "application/json"),
+            auth_resp = await client.post(
+                f"{SERVICES['auth']}/login",
+                json=data,
+                headers={"x-trace-id": trace_id}
             )
         except Exception as e:
-            logger.error(f"Login failed: {e}")
+            logger.error(f"Login failed (auth-service): {e}")
             return Response(
                 content=json.dumps({"success": False, "message": "Auth service unavailable"}),
                 status_code=503,
                 media_type="application/json",
             )
 
-# --------------------------------------------------
-# OPTIONS Preflight
-# --------------------------------------------------
-@app.options("/{full_path:path}")
-async def preflight(full_path: str, request: Request):
-    headers = make_cors_headers(request)
-    logger.info(f"Preflight CORS check for {full_path}")
-    return Response(status_code=200, headers=headers)
-
-# --------------------------------------------------
-# SSE proxy endpoint (special handling to stream)
-# --------------------------------------------------
-@app.get("/orders/orders/events/stream")
-async def sse_proxy(request: Request, token: str = Query(...)):
-    """Forward SSE stream to order-service (exact same path)."""
-
-    target_url = f"{SERVICES['orders']}/orders/orders/events/stream?token={token}"
-    logger.info(f"[SSE] Proxy → {target_url}")
-
-    headers = {
-        "x-trace-id": request.state.trace_id,
-        "Accept": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive"
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=None) as client:
-            resp = await client.get(
-                target_url, 
-                headers=headers,
-                timeout=None,
-                follow_redirects=True
-            )
-
-            # If order-service returns error, propagate it
-            if resp.status_code != 200:
-                return Response(
-                    content=resp.content,
-                    status_code=resp.status_code,
-                    media_type=resp.headers.get("content-type", "application/json")
-                )
-
-            # Correct SSE headers
-            return StreamingResponse(
-                resp.aiter_bytes(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache, no-transform",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                    "Access-Control-Allow-Origin": "*"
-                },
-            )
-
-    except Exception as e:
-        logger.error(f"[SSE ERROR] {e}")
+    # 2️⃣ Propagate auth-service error
+    if auth_resp.status_code >= 400:
         return Response(
-            content=json.dumps({"error": "SSE proxy failed"}),
-            status_code=500,
-            media_type="application/json",
+            content=auth_resp.content,
+            status_code=auth_resp.status_code,
+            media_type=auth_resp.headers.get("content-type", "application/json"),
         )
 
+    # 3️⃣ Parse auth response
+    try:
+        auth_data = auth_resp.json()
+        token = auth_data.get("data", {}).get("token")
+        role = auth_data.get("data", {}).get("role")
+        user_id = None
+        if token:
+            decoded = decode_jwt(token)
+            if decoded:
+                user_id = decoded.get("sub")
+                logger.info(f"[TRACE {trace_id}] User logged in: {user_id} ({decoded.get('role')})")
+    except Exception:
+        token = None
+        role = None
+        user_id = None
 
+    # 4️⃣ If driver, fetch driver record
+    driver_info = None
+    if role == "driver" and user_id:
+        try:
+            async with httpx.AsyncClient() as client:
+                driver_resp = await client.get(
+                    f"{SERVICES['drivers'].rstrip('/')}/drivers/{user_id}",
+                    headers={"x-trace-id": trace_id}
+                )
+                if driver_resp.status_code == 200:
+                    driver_info = driver_resp.json()
+                else:
+                    logger.warning(f"Driver service returned {driver_resp.status_code} for driver {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to fetch driver info: {e}")
+
+    # 5️⃣ Build final response
+    final_data = auth_data.get("data", {})
+    if driver_info:
+        final_data["driver"] = driver_info
+
+    return Response(
+        content=json.dumps({"success": True, "data": final_data, "message": "Login successful"}),
+        status_code=200,
+        media_type="application/json",
+        headers={"x-trace-id": trace_id},
+    )
 
 # --------------------------------------------------
 # Main proxy route
@@ -232,7 +334,7 @@ async def sse_proxy(request: Request, token: str = Query(...)):
 async def proxy(request: Request, service: str, path: str = ""):
     cors_headers = make_cors_headers(request)
 
-    # Handle OPTIONS early
+    # Handle CORS preflight
     if request.method == "OPTIONS":
         return Response(status_code=200, headers=cors_headers)
 
@@ -244,15 +346,14 @@ async def proxy(request: Request, service: str, path: str = ""):
             headers=cors_headers,
         )
 
-    # --------------------------------------------------
-    # JWT verification (for protected routes)
-    # --------------------------------------------------
+    # Extract JWT
     auth_header = request.headers.get("authorization")
     user_claims = None
-    if auth_header and auth_header.startswith("Bearer "):
+    if auth_header and auth_header.lower().startswith("bearer "):
         token = auth_header.split(" ")[1]
         user_claims = decode_jwt(token)
 
+    # Check protected services
     if service in PROTECTED_SERVICES and not user_claims:
         return Response(
             content=json.dumps({"error": "Unauthorized"}),
@@ -261,17 +362,38 @@ async def proxy(request: Request, service: str, path: str = ""):
             headers=cors_headers,
         )
 
-    # --------------------------------------------------
-    # Target URL
-    # --------------------------------------------------
-    target_url = SERVICES[service]
-    if path:
-        target_url = f"{target_url.rstrip('/')}/{path.lstrip('/')}"
+    # Role-based rules
+    if user_claims:
+        role = user_claims.get("role")
+        user_id = user_claims.get("sub")
 
-    # --------------------------------------------------
+        if service == "drivers" and role != "driver":
+            return Response(
+                content=json.dumps({"error": "Driver privileges required"}),
+                status_code=403,
+                media_type="application/json",
+                headers=cors_headers,
+            )
+
+        if service == "users" and role != "user":
+            return Response(
+                content=json.dumps({"error": "User privileges required"}),
+                status_code=403,
+                media_type="application/json",
+                headers=cors_headers,
+            )
+
+        # Only rewrite /drivers/me → /drivers/<driver_id>
+        if service == "drivers" and path == "me" and role == "driver":
+            path = f"drivers/{user_id}"
+
+    # Build target URL
+    target_url = f"{SERVICES[service].rstrip('/')}/{path.lstrip('/')}" if path else SERVICES[service]
+
     # Forward headers
-    # --------------------------------------------------
     headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+    if auth_header:
+        headers["authorization"] = auth_header
     headers["x-trace-id"] = request.state.trace_id
     if user_claims:
         headers["x-user-id"] = user_claims.get("sub", "")
@@ -279,9 +401,6 @@ async def proxy(request: Request, service: str, path: str = ""):
 
     logger.info(f"→ Forwarding {request.method} {request.url.path} → {target_url}")
 
-    # --------------------------------------------------
-    # Forward the request
-    # --------------------------------------------------
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             proxied_response = await forward_with_retries(
@@ -292,18 +411,15 @@ async def proxy(request: Request, service: str, path: str = ""):
                 content=await request.body(),
             )
 
-        # Keep original content-type when possible
         media_type = proxied_response.headers.get("content-type", "application/json")
-        # Build response
         response = Response(
             content=proxied_response.content,
             status_code=proxied_response.status_code,
             media_type=media_type,
         )
-        # add CORS headers
+
         for k, v in cors_headers.items():
             response.headers[k] = v
-        # preserve trace id
         response.headers["x-trace-id"] = request.state.trace_id
 
         return response
@@ -315,7 +431,6 @@ async def proxy(request: Request, service: str, path: str = ""):
             media_type="application/json",
             headers=cors_headers,
         )
-
     except Exception as e:
         logger.exception(f"Error proxying {service}: {e}")
         return Response(
@@ -324,6 +439,7 @@ async def proxy(request: Request, service: str, path: str = ""):
             media_type="application/json",
             headers=cors_headers,
         )
+
 @app.websocket("/ws/orders")
 async def orders_ws(websocket: WebSocket):
     await websocket.accept()
