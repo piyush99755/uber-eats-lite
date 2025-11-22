@@ -135,17 +135,34 @@ async def confirm_payment(req: ConfirmPaymentRequest, user=Depends(get_current_u
 
     amount = intent.amount / 100
 
-    # Save payment to DB
-    payment_id = str(uuid4())
-    await database.execute(payments.insert().values(
-        id=payment_id,
-        order_id=req.order_id,
-        amount=amount,
-        status="paid",
-        user_id=user["id"]
-    ))
+    # Check if payment for this order already exists
+    existing = await database.fetch_one(
+        payments.select().where(payments.c.order_id == req.order_id)
+    )
 
-    # Broadcast event to order-service
+    if existing:
+        payment_id = existing["id"]
+        logger.warning(f"[TRACE {trace_id}] Payment already exists for order {req.order_id}, skipping insert")
+        # Optionally, update status if needed:
+        # await database.execute(
+        #     payments.update()
+        #         .where(payments.c.order_id == req.order_id)
+        #         .values(status="paid")
+        # )
+    else:
+        payment_id = str(uuid4())
+        await database.execute(
+            payments.insert().values(
+                id=payment_id,
+                order_id=req.order_id,
+                amount=amount,
+                status="paid",
+                user_id=user["id"]
+            )
+        )
+        logger.info(f"[TRACE {trace_id}] Payment saved to DB for order {req.order_id}")
+
+    # Broadcast event to order-service and driver-service
     await publish_event("payment.completed", {
         "payment_id": payment_id,
         "order_id": req.order_id,
@@ -156,6 +173,7 @@ async def confirm_payment(req: ConfirmPaymentRequest, user=Depends(get_current_u
 
     logger.info(f"[TRACE {trace_id}] Payment confirmed for order {req.order_id}")
     return {"message": "Payment confirmed and order marked as paid"}
+
 
 # ───────────────────────────────────────────────────────────────
 # List Payments

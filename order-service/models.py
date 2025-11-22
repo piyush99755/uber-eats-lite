@@ -7,7 +7,7 @@ orders = Table(
     metadata,
     Column("id", String, primary_key=True),
     Column("user_id", String, nullable=False),
-    Column("items", JSON, nullable=False),  # ✅ FIX: JSON instead of String
+    Column("items", JSON, nullable=False),  
     Column("total", Float, nullable=False),
     Column("status", String, default="pending"),
     Column("payment_status", String, default="pending"),

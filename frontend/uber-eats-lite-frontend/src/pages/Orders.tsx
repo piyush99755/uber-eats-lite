@@ -149,142 +149,236 @@ useEffect(() => {
 
   const connect = () => {
     if (stopped) return;
+
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
     ws.onopen = () => console.log("[WS] Connected");
-    ws.onclose = () => setTimeout(() => !stopped && connect(), 5000);
     ws.onerror = (err) => console.error("[WS] Error", err);
 
+    ws.onclose = () => {
+      if (!stopped) {
+        console.warn("[WS] Disconnected — reconnecting in 5s…");
+        setTimeout(connect, 5000);
+      }
+    };
+
     ws.onmessage = async (msg) => {
-  if (!msg.data) return;
-  let parsed: any;
-  try { parsed = JSON.parse(msg.data); } catch { return; }
+      if (!msg.data) return;
 
-  const eventType = (parsed?.event_type ?? parsed?.event ?? parsed?.type ?? "").toLowerCase();
-  const payload = parsed?.payload ?? parsed?.data ?? parsed ?? {};
-  const orderId = normalizeId(payload) ?? normalizeId(parsed) ?? payload?.order_id ?? payload?.id ?? null;
-  if (!eventType || !orderId) return;
-
-  const payloadIsPartial = !payload.user_id || !Array.isArray(payload.items) || payload.items.length === 0 || typeof payload.total !== "number";
-  const resolveAuthoritative = async (): Promise<Order | null> => {
-    if (!payloadIsPartial) return { ...(payload as any), id: orderId, items: Array.isArray(payload.items) ? payload.items : [] } as Order;
-    return await fetchSingleOrder(orderId);
-  };
-
-  try {
-    const authoritative = await resolveAuthoritative();
-    if (!authoritative) return;
-
-    setOrders((prev) => upsertOrderPure(prev, authoritative));
-
-    // ---------- TOASTS ----------
-
-    // New order
-    if (eventType.startsWith("order.created") || eventType.includes("order_create") || eventType.includes("order.create")) {
-      if (!recentlyCreated.current.has(orderId)) {
-        toast.info(authoritative.user_id === currentUserId 
-          ? `🆕 You created order ${orderId}` 
-          : `🆕 New order: ${orderId}`);
-        recentlyCreated.current.add(orderId);
-        setTimeout(() => recentlyCreated.current.delete(orderId), 60_000);
+      let parsed: any;
+      try {
+        parsed = JSON.parse(msg.data);
+      } catch {
+        console.warn("WS: JSON parse error", msg.data);
+        return;
       }
-      return;
-    }
 
-    // Order updated / paid
-    if (eventType.startsWith("order.updated") || eventType.includes("order_update") || eventType.includes("order.update")) {
-      const before = orders.find((o) => o.id === orderId);
-      if (before && before.status !== "paid" && authoritative.status === "paid") {
-        if (!recentlyPaid.current.has(orderId)) {
-          toast.success(authoritative.user_id === currentUserId
-            ? `💳 Payment successful for your order ${orderId}`
-            : `💳 Payment successful for order ${orderId}`);
-          recentlyPaid.current.add(orderId);
-          setTimeout(() => recentlyPaid.current.delete(orderId), 60_000);
+      const eventType = (
+        parsed.event_type ||
+        parsed.event ||
+        parsed.type ||
+        ""
+      ).toLowerCase();
+
+      const payload = parsed.payload ?? parsed.data ?? parsed ?? {};
+      const orderId =
+        normalizeId(payload) ??
+        normalizeId(parsed) ??
+        payload.order_id ??
+        payload.id ??
+        null;
+
+      if (!eventType || !orderId) return;
+
+      const isPartial =
+        !payload.user_id ||
+        !Array.isArray(payload.items) ||
+        payload.items.length === 0 ||
+        typeof payload.total !== "number";
+
+      const authoritative: Order | null = isPartial
+        ? await fetchSingleOrder(orderId)
+        : ({
+            ...(payload as any),
+            id: orderId,
+            items: Array.isArray(payload.items) ? payload.items : [],
+          } as Order);
+
+      if (!authoritative) return;
+
+      // Always update local list
+      setOrders((prev) => upsertOrderPure(prev, authoritative));
+
+      // ─────────────────────
+      //  EVENT HANDLERS
+      // ─────────────────────
+
+      //
+      // 1️⃣ Order Created
+      //
+      if (
+        eventType.startsWith("order.created") ||
+        eventType.includes("order_create")
+      ) {
+        if (!recentlyCreated.current.has(orderId)) {
+          toast.info(
+            authoritative.user_id === currentUserId
+              ? `🆕 You created order ${orderId}`
+              : `🆕 New order ${orderId}`
+          );
+          recentlyCreated.current.add(orderId);
+          setTimeout(() => recentlyCreated.current.delete(orderId), 60000);
         }
+        return;
       }
 
-      // Paid but no driver
-      if (authoritative.status === "paid" && !authoritative.driver_id && !recentlyAssigning.current.has(orderId)) {
+      //
+      // 2️⃣ Order Updated / Paid
+      //
+      if (
+        eventType.startsWith("order.updated") ||
+        eventType.includes("order_update")
+      ) {
+        setOrders((prev) => {
+          const before = prev.find((o) => o.id === orderId);
+          const isNowPaid =
+            before && before.status !== "paid" && authoritative.status === "paid";
+
+          if (isNowPaid && !recentlyPaid.current.has(orderId)) {
+            toast.success(
+              authoritative.user_id === currentUserId
+                ? `💳 Payment successful for order ${orderId}`
+                : `💳 Payment successful for order ${orderId}`
+            );
+            recentlyPaid.current.add(orderId);
+            setTimeout(() => recentlyPaid.current.delete(orderId), 60000);
+          }
+
+          return prev;
+        });
+
+        // Paid but no driver yet → assigning
+        if (
+          authoritative.status === "paid" &&
+          !authoritative.driver_id &&
+          !recentlyAssigning.current.has(orderId)
+        ) {
+          setOrders((prev) =>
+            prev.map((o) =>
+              o.id === orderId ? { ...o, assigning: true } : o
+            )
+          );
+
+          const driversAvailable = payload.drivers_available ?? true;
+          driversAvailable
+            ? toast.info(`🔎 Assigning driver for order ${orderId}…`)
+            : toast.warn(`⚠️ No drivers available for order ${orderId}`);
+
+          recentlyAssigning.current.add(orderId);
+          setTimeout(() => recentlyAssigning.current.delete(orderId), 60000);
+        }
+        return;
+      }
+
+      //
+      // 3️⃣ Driver Assigned
+      //
+      if (
+        eventType.startsWith("driver.assigned") ||
+        eventType.includes("driver_assigned")
+      ) {
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.id === orderId ? { ...o, assigning: false } : o
+          )
+        );
+
+        if (!recentlyAssigned.current.has(orderId)) {
+          toast.success(
+            authoritative.user_id === currentUserId
+              ? `🚗 Driver assigned to your order ${orderId}`
+              : `🚗 Driver assigned to order ${orderId}`
+          );
+          recentlyAssigned.current.add(orderId);
+          setTimeout(() => recentlyAssigned.current.delete(orderId), 60000);
+        }
+        return;
+      }
+
+      //
+      // 4️⃣ Driver Pending (no driver)
+      //
+      if (eventType === "driver.pending") {
         setOrders((prev) =>
           prev.map((o) =>
             o.id === orderId ? { ...o, assigning: true } : o
           )
         );
 
-        const driversAvailable = payload.drivers_available ?? true; // adjust if backend provides
-        if (driversAvailable) {
-          toast.info(`🔎 Assigning driver for your order ${orderId}…`);
-        } else {
-          toast.warn(`⚠️ No drivers available for your order ${orderId} at the moment`);
+        if (payload.reason === "no drivers available") {
+          toast.warn(`⚠️ No drivers available for order ${orderId}`);
         }
-
-        recentlyAssigning.current.add(orderId);
-        setTimeout(() => recentlyAssigning.current.delete(orderId), 60_000);
+        return;
       }
-      return;
-    }
 
-    // Driver assigned
-    if (eventType.startsWith("driver.assigned") || eventType.includes("driver_assigned")) {
-      setOrders((prev) =>
-        prev.map((o) =>
-          o.id === orderId ? { ...o, assigning: false } : o
-        )
-      );
-
-      if (!recentlyAssigned.current.has(orderId)) {
-        toast.success(authoritative.user_id === currentUserId
-          ? `🚗 Driver assigned to your order ${orderId}`
-          : `🚗 Driver assigned to order ${orderId}`);
-        recentlyAssigned.current.add(orderId);
-        setTimeout(() => recentlyAssigned.current.delete(orderId), 60_000);
+      //
+      // 5️⃣ Driver Failed
+      //
+      if (eventType === "driver.failed") {
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.id === orderId ? { ...o, assigning: false } : o
+          )
+        );
+        toast.error(`❌ Driver assignment failed for order ${orderId}`);
+        return;
       }
-      return;
-    }
 
-    // Driver pending (no drivers yet)
-    if (eventType === "driver.pending") {
-      setOrders((prev) =>
-        prev.map((o) =>
-          o.id === orderId ? { ...o, assigning: true } : o
-        )
-      );
+      //
+      // 6️⃣ Delivery Completed  ✔️ NEW
+      //
+      if (
+        eventType.startsWith("delivery.completed") ||
+        eventType.includes("delivery_complete") ||
+        eventType.includes("order.delivered")
+      ) {
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.id === orderId ? { ...o, status: "delivered", assigning: false } : o
+          )
+        );
 
-      if (payload.reason === "no drivers available") {
-        toast.warn(`⚠️ No drivers currently available for order ${orderId}`);
+        toast.success(
+          authoritative.user_id === currentUserId
+            ? `📦 Your order ${orderId} was delivered!`
+            : `📦 Order ${orderId} delivered`
+        );
+
+        return;
       }
-      return;
-    }
 
-    // Driver failed (assignment failed after retries)
-    if (eventType === "driver.failed") {
-      setOrders((prev) =>
-        prev.map((o) =>
-          o.id === orderId ? { ...o, assigning: false } : o
-        )
-      );
-      toast.error(`❌ Driver assignment failed for order ${orderId} after retries`);
-      return;
-    }
-
-    // Order deleted
-    if (eventType.startsWith("order.deleted") || eventType.includes("order_deleted")) {
-      toast.warn(`🗑 Order ${orderId} deleted`);
-      return;
-    }
-
-  } catch (err) {
-    console.error("[WS] handler error:", err);
-  }
-};
-
+      //
+      // 7️⃣ Order Deleted
+      //
+      if (
+        eventType.startsWith("order.deleted") ||
+        eventType.includes("order_deleted")
+      ) {
+        toast.warn(`🗑 Order ${orderId} deleted`);
+        return;
+      }
+    };
   };
 
   connect();
-  return () => { stopped = true; wsRef.current?.close(); };
-}, [BASE_URL, fetchSingleOrder, upsertOrderPure, orders, currentUserId]);
+
+  return () => {
+    stopped = true;
+    wsRef.current?.close();
+  };
+}, [BASE_URL, fetchSingleOrder, upsertOrderPure, currentUserId]);
+
 
 
   // ---------- handlers ----------

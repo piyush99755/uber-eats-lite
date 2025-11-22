@@ -13,6 +13,19 @@ import DriverOrders from "./pages/DriverOrders";
 import DriverProfile from "./pages/DriverProfile";
 import api from "./api/api";
 
+// ProtectedRoute component
+interface ProtectedRouteProps {
+  role: string | null;
+  allowedRoles: string[];
+  children: JSX.Element;
+}
+
+function ProtectedRoute({ role, allowedRoles, children }: ProtectedRouteProps) {
+  if (!role) return <Navigate to="/" replace />; // not logged in
+  if (!allowedRoles.includes(role)) return <Navigate to="/" replace />; // unauthorized
+  return children;
+}
+
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
   const [role, setRole] = useState<string | null>(null);
@@ -58,44 +71,80 @@ export default function App() {
 
           <main className="flex-1 p-6 overflow-auto">
             <Routes>
-          {/* Redirect root based on role */}
-          <Route
-            path="/"
-            element={
-              role === "driver"
-                ? <Navigate to="/driver/orders" replace />
-                : role === "admin"
-                ? <Navigate to="/users" replace />
-                : <Navigate to="/orders" replace />
-            }
-          />
+              {/* Redirect root based on role */}
+              <Route
+                path="/"
+                element={
+                  role === "driver"
+                    ? <Navigate to="/driver/orders" replace />
+                    : role === "admin"
+                    ? <Navigate to="/users" replace />
+                    : <Navigate to="/orders" replace />
+                }
+              />
 
-          {/* USER ROUTES */}
-          {role === "user" && (
-            <>
-              <Route path="/orders" element={<Orders />} />
-              <Route path="/payments" element={<Payments />} />
-            </>
-          )}
+              {/* USER ROUTES */}
+              <Route
+                path="/orders"
+                element={
+                  <ProtectedRoute role={role} allowedRoles={["user"]}>
+                    <Orders />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/payments"
+                element={
+                  <ProtectedRoute role={role} allowedRoles={["user"]}>
+                    <Payments />
+                  </ProtectedRoute>
+                }
+              />
 
-          {/* DRIVER ROUTES */}
-          {role === "driver" && (
-            <>
-              <Route path="/driver/orders" element={<DriverOrders />} />
-              <Route path="/driver/profile" element={<DriverProfile />} />
-            </>
-          )}
+              {/* DRIVER ROUTES */}
+              <Route
+                path="/driver/orders"
+                element={
+                  <ProtectedRoute role={role} allowedRoles={["driver"]}>
+                    <DriverOrders />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/driver/profile"
+                element={
+                  <ProtectedRoute role={role} allowedRoles={["driver"]}>
+                    <DriverProfile />
+                  </ProtectedRoute>
+                }
+              />
 
-          {/* ADMIN ROUTES */}
-          {role === "admin" && (
-            <>
-              <Route path="/users" element={<Users />} />
-              <Route path="/drivers" element={<Drivers />} />
-              <Route path="/events" element={<Events />} />
-            </>
-          )}
-        </Routes>
-
+              {/* ADMIN ROUTES */}
+              <Route
+                path="/users"
+                element={
+                  <ProtectedRoute role={role} allowedRoles={["admin"]}>
+                    <Users />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/drivers"
+                element={
+                  <ProtectedRoute role={role} allowedRoles={["admin"]}>
+                    <Drivers />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/events"
+                element={
+                  <ProtectedRoute role={role} allowedRoles={["admin"]}>
+                    <Events />
+                  </ProtectedRoute>
+                }
+              />
+            </Routes>
           </main>
         </div>
       )}

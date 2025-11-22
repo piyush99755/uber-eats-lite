@@ -8,6 +8,10 @@ from fastapi import FastAPI, Request, Response, Query,WebSocket, Depends
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
+from shared.auth import get_optional_user
+import sys
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # --------------------------------------------------
 # App setup
@@ -442,8 +446,9 @@ async def proxy(request: Request, service: str, path: str = ""):
 
 @app.websocket("/ws/orders")
 async def orders_ws(websocket: WebSocket):
-    await websocket.accept()
     token = websocket.query_params.get("token")
+    
+    # --- Validate token ---
     if not token:
         await websocket.close(code=4001)
         return
@@ -453,29 +458,49 @@ async def orders_ws(websocket: WebSocket):
         await websocket.close(code=4002)
         return
 
+    await websocket.accept()
+
+    # SSE source endpoint
     sse_url = f"{SERVICES['orders']}/orders/orders/events/stream?token={token}"
+
     headers = {
         "Accept": "text/event-stream",
-        "x-trace-id": str(uuid.uuid4()),
+        "x-trace-id": str(uuid.uuid4())
     }
 
     try:
         async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("GET", sse_url, headers=headers) as sse_resp:
-                if sse_resp.status_code != 200:
-                    await websocket.send_json({"error": "Failed to connect to order service SSE"})
-                    await websocket.close()
-                    return
+            async with client.stream("GET", sse_url, headers=headers) as sse_response:
 
-                async for line in sse_resp.aiter_lines():
-                    if line.startswith("data:"):
-                        data_str = line[5:].strip()
-                        try:
-                            event = json.loads(data_str)
-                            await websocket.send_json(event)
-                        except Exception as e:
-                            logger.error(f"Failed to send event to WebSocket: {e}")
+                buffer = ""
+
+                async for chunk in sse_response.aiter_text():
+                    buffer += chunk
+
+                    # Process each SSE event in the buffer
+                    while "\n\n" in buffer:
+                        raw_event, buffer = buffer.split("\n\n", 1)
+
+                        for line in raw_event.splitlines():
+                            if not line.startswith("data:"):
+                                continue
+
+                            data_str = line[len("data:"):].strip()
+
+                            try:
+                                event_json = json.loads(data_str)
+                                await websocket.send_json(event_json)
+
+                            except Exception as ws_err:
+                                logger.error(f"Failed to send event to WS: {ws_err}")
+                                await websocket.close(code=4003)
+                                return
+
     except Exception as e:
         logger.error(f"SSE proxy error: {e}")
+
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except:
+            pass

@@ -1,8 +1,11 @@
+# consumer.py
+# consumer.py (order-service) — corrected
 import asyncio
 import json
 import os
 from dotenv import load_dotenv
 import aioboto3
+import logging
 
 from database import database
 from models import orders
@@ -10,6 +13,9 @@ from events import publish_event, log_event_to_db
 from ws_manager import manager
 
 load_dotenv()
+
+logger = logging.getLogger("order-service.consumer")
+logger.setLevel(logging.INFO)
 
 USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
@@ -19,21 +25,26 @@ DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
 
 session = aioboto3.Session()
 
-
 # -----------------------------------------------------------
 # Event Parser
 # -----------------------------------------------------------
 def parse_sqs_message(body: str):
+    """
+    Normalize SQS/SNS/EventBridge message shapes to (event_type, payload_dict, event_id).
+    """
     try:
         outer = json.loads(body)
     except Exception:
         return None, {}, None
 
+    # SNS wraps with {"Message": "<json-string>"}
     if isinstance(outer, dict) and "Message" in outer:
         try:
-            outer = json.loads(outer["Message"])
+            maybe = json.loads(outer["Message"])
+            outer = maybe
         except Exception:
-            pass
+            # leave as-is if it's not JSON
+            outer = outer
 
     if isinstance(outer, str):
         try:
@@ -58,6 +69,7 @@ def parse_sqs_message(body: str):
         or outer
     )
 
+    # payload sometimes is a JSON string
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
@@ -80,35 +92,43 @@ def parse_sqs_message(body: str):
 
 
 # -----------------------------------------------------------
-# PAYMENT HANDLER
+# PAYMENT HANDLER (fixed)
 # -----------------------------------------------------------
 async def handle_payment_completed(payload: dict, event_id=None):
+    """
+    Called when payment.completed arrives.
+    Important: convert DB Record -> dict before using .get(...)
+    """
     order_id = payload.get("order_id") or event_id
     if not order_id:
-        print(f"[Payment] ⚠ Missing order_id: {payload}")
+        logger.warning("[Payment] ⚠ Missing order_id in payment.completed payload")
         return
 
-    order = None
+    # Wait briefly for DB record to appear (race with order creation)
+    order_row = None
     for _ in range(10):
-        order = await database.fetch_one(
-            orders.select().where(orders.c.id == order_id)
-        )
-        if order:
+        order_row = await database.fetch_one(orders.select().where(orders.c.id == order_id))
+        if order_row:
             break
         await asyncio.sleep(0.2)
 
-    if not order:
-        print(f"[Payment] ❌ Order {order_id} not found")
+    if not order_row:
+        logger.error(f"[Payment] ❌ Order {order_id} not found in DB")
         return
 
-    if order["payment_status"] != "paid":
+    # convert to plain dict so we can safely use .get()
+    order = dict(order_row)
+
+    # Update DB if not already paid
+    if order.get("payment_status") != "paid":
         await database.execute(
             orders.update()
             .where(orders.c.id == order_id)
             .values(payment_status="paid", status="paid")
         )
-        print(f"[Payment] ✅ Order {order_id} marked PAID")
+        logger.info(f"[Payment] ✅ Order {order_id} marked PAID")
 
+    # Broadcast to local WS clients
     await manager.broadcast({
         "event": "order.updated",
         "order_id": order_id,
@@ -116,8 +136,17 @@ async def handle_payment_completed(payload: dict, event_id=None):
         "payment_status": "paid"
     })
 
+    # Publish events: payment.completed (so driver-service) and order.updated (UI/notifications)
+    # ensure event_id is a string
+    ev_id = str(event_id or payload.get("event_id") or order_id)
+    await publish_event("payment.completed", {
+        "event_id": ev_id,
+        "order_id": order_id,
+        "payment_status": "paid"
+    })
+
     await publish_event("order.updated", {
-        "event_id": str(event_id) or str(order_id),
+        "event_id": ev_id,
         "order_id": order_id,
         "status": "paid",
         "payment_status": "paid"
@@ -132,7 +161,7 @@ async def handle_driver_assigned(payload: dict):
     driver_id = payload.get("driver_id")
 
     if not order_id or not driver_id:
-        print("[DriverAssigned] ⚠ missing fields")
+        logger.warning("[DriverAssigned] ⚠ missing fields")
         return
 
     await database.execute(
@@ -141,7 +170,7 @@ async def handle_driver_assigned(payload: dict):
         .values(driver_id=driver_id, status="assigned")
     )
 
-    print(f"[DriverAssigned] 🚗 Driver {driver_id} → Order {order_id}")
+    logger.info(f"[DriverAssigned] 🚗 Driver {driver_id} → Order {order_id}")
 
     await manager.broadcast({
         "event": "order.updated",
@@ -162,7 +191,7 @@ async def handle_driver_pending(payload: dict):
     order_id = payload.get("order_id")
     reason = payload.get("reason", "no drivers available")
 
-    print(f"[DriverPending] ⚠ Order {order_id} pending: {reason}")
+    logger.info(f"[DriverPending] ⚠ Order {order_id} pending: {reason}")
 
     await manager.broadcast({
         "event": "driver.pending",
@@ -187,7 +216,7 @@ async def handle_driver_failed(payload: dict):
         .values(status="failed")
     )
 
-    print(f"[DriverFailed] ❌ Order {order_id} failed")
+    logger.info(f"[DriverFailed] ❌ Order {order_id} failed: {reason}")
 
     await manager.broadcast({
         "event": "driver.failed",
@@ -203,112 +232,91 @@ async def handle_driver_failed(payload: dict):
 
 
 # -----------------------------------------------------------
-# PAYMENT QUEUE POLLER
+# Generic poller used by main.startup (keeps code DRY)
 # -----------------------------------------------------------
-async def poll_payment_queue():
+async def poll_queue(queue_url: str, handlers: dict, name: str = "queue"):
+    """
+    Generic SQS poller. 'handlers' maps event_type -> coroutine function.
+    If a handler returns or completes, message will be deleted.
+    """
     if not USE_AWS:
-        print("[OrderConsumer] Local mode: payment queue disabled")
+        logger.info(f"[{name}] Local mode: queue disabled")
         while True:
             await asyncio.sleep(3600)
 
     async with session.client("sqs", region_name=AWS_REGION) as sqs:
-        print(f"[OrderConsumer] 💳 Listening → {PAYMENT_QUEUE_URL}")
+        logger.info(f"[{name}] Listening → {queue_url}")
 
         while True:
             try:
                 resp = await sqs.receive_message(
-                    QueueUrl=PAYMENT_QUEUE_URL,
+                    QueueUrl=queue_url,
                     MaxNumberOfMessages=5,
                     WaitTimeSeconds=10,
                 )
-                msgs = resp.get("Messages", []) or []
+                messages = resp.get("Messages", []) or []
 
-                for msg in msgs:
+                for msg in messages:
                     event_type, payload, event_id = parse_sqs_message(msg["Body"])
+
+                    # defensive: if no event_type, still delete to avoid tight loop
+                    if not event_type:
+                        logger.warning(f"[{name}] ⚠ Received message with no event_type, deleting")
+                        await sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
+                        continue
 
                     processed = await log_event_to_db(event_type, payload, "order-service")
                     if not processed:
-                        await sqs.delete_message(
-                            QueueUrl=PAYMENT_QUEUE_URL,
-                            ReceiptHandle=msg["ReceiptHandle"]
-                        )
+                        logger.info(f"[{name}] ⏭ Duplicate {event_type} ({event_id}) — deleting message")
+                        await sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
                         continue
 
-                    if event_type == "payment.completed":
-                        await handle_payment_completed(payload, event_id)
-                    else:
-                        print(f"[OrderConsumer] ⚠ Unknown event {event_type}")
+                    handler = handlers.get(event_type)
+                    try:
+                        if handler:
+                            # some handlers expect (payload, event_id), others only (payload)
+                            if asyncio.iscoroutinefunction(handler):
+                                # call accordingly
+                                try:
+                                    await handler(payload, event_id)
+                                except TypeError:
+                                    await handler(payload)
+                        else:
+                            logger.info(f"[{name}] ⚠ No handler for event type: {event_type}")
+                    except Exception as e:
+                        logger.exception(f"[{name}] Handler error for {event_type}: {e}")
 
-                    await sqs.delete_message(
-                        QueueUrl=PAYMENT_QUEUE_URL,
-                        ReceiptHandle=msg["ReceiptHandle"]
-                    )
+                    # delete SQS message in all cases to avoid reprocessing loops
+                    try:
+                        await sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
+                    except Exception as e:
+                        logger.warning(f"[{name}] Failed to delete message: {e}")
 
             except Exception as e:
-                print(f"[OrderConsumer] Payment queue error: {e}")
+                logger.exception(f"[{name}] Queue error: {e}")
                 await asyncio.sleep(5)
 
 
-# -----------------------------------------------------------
-# DRIVER QUEUE POLLER
-# -----------------------------------------------------------
-async def poll_driver_queue():
-    if not USE_AWS:
-        print("[OrderConsumer] Local mode: driver queue disabled")
-        while True:
-            await asyncio.sleep(3600)
-
-    async with session.client("sqs", region_name=AWS_REGION) as sqs:
-        print(f"[OrderConsumer] 🚗 Listening → {DRIVER_QUEUE_URL}")
-
-        while True:
-            try:
-                resp = await sqs.receive_message(
-                    QueueUrl=DRIVER_QUEUE_URL,
-                    MaxNumberOfMessages=5,
-                    WaitTimeSeconds=10,
-                )
-                msgs = resp.get("Messages", []) or []
-
-                for msg in msgs:
-                    event_type, payload, event_id = parse_sqs_message(msg["Body"])
-
-                    processed = await log_event_to_db(event_type, payload, "order-service")
-                    if not processed:
-                        await sqs.delete_message(
-                            QueueUrl=DRIVER_QUEUE_URL,
-                            ReceiptHandle=msg["ReceiptHandle"]
-                        )
-                        continue
-
-                    if event_type in ("driver.assigned", "driver_assigned"):
-                        await handle_driver_assigned(payload)
-                    elif event_type == "driver.pending":
-                        await handle_driver_pending(payload)
-                    elif event_type == "driver.failed":
-                        await handle_driver_failed(payload)
-                    else:
-                        print(f"[OrderConsumer] ⚠ Unknown driver event {event_type}")
-
-                    await sqs.delete_message(
-                        QueueUrl=DRIVER_QUEUE_URL,
-                        ReceiptHandle=msg["ReceiptHandle"]
-                    )
-
-            except Exception as e:
-                print(f"[OrderConsumer] Driver queue error: {e}")
-                await asyncio.sleep(5)
+# Expose functions for import by main.py
+__all__ = [
+    "poll_queue",
+    "handle_payment_completed",
+    "handle_driver_assigned",
+    "handle_driver_failed",
+    "handle_driver_pending"
+]
 
 
-# -----------------------------------------------------------
-# MAIN ENTRY
-# -----------------------------------------------------------
+# If run directly (not necessary in container since main.py schedules pollers)
 if __name__ == "__main__":
     async def main():
         await database.connect()
         await asyncio.gather(
-            poll_payment_queue(),
-            poll_driver_queue(),
+            poll_queue(PAYMENT_QUEUE_URL, {"payment.completed": handle_payment_completed}, "payment.queue"),
+            poll_queue(DRIVER_QUEUE_URL, {
+                "driver.assigned": handle_driver_assigned,
+                "driver.pending": handle_driver_pending,
+                "driver.failed": handle_driver_failed
+            }, "driver.queue")
         )
-
     asyncio.run(main())

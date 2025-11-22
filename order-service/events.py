@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from database import database
 from models import processed_events
 from sse_clients import clients
-from ws_manager import manager  # New WebSocket manager
+from ws_manager import manager
 
 load_dotenv()
 
@@ -18,7 +18,6 @@ logger.setLevel(logging.INFO)
 USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# Target Queues
 DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
 NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
 PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL")
@@ -26,11 +25,12 @@ EVENT_BUS = os.getenv("EVENT_BUS_NAME")
 
 session = aioboto3.Session()
 
-# Map events to services
+# Event routing table
 EVENT_TARGETS = {
     "order.created": ["Notification Service", "Driver Service", "Payment Service"],
     "order.updated": ["Notification Service", "Driver Service", "Payment Service"],
     "order.deleted": ["Notification Service", "Driver Service"],
+    "payment.completed": ["Driver Service"],   # correct fix
 }
 
 SERVICE_QUEUE_MAP = {
@@ -42,51 +42,57 @@ SERVICE_QUEUE_MAP = {
 
 async def publish_event(event_type: str, data: dict, trace_id: str = None):
     """
-    Publish an event to:
-    1. SSE clients (live UI updates)
-    2. WebSocket clients (new WS manager)
-    3. AWS SQS / EventBridge (if enabled)
+    Publishes event to:
+    - SSE
+    - WebSocket
+    - SQS queues
+    - EventBridge (optional)
     """
+
     event_time = datetime.utcnow().isoformat()
+
+    event_id = data.get("event_id") or f"{event_type}_{datetime.utcnow().timestamp()}"
+
     event_payload = {
         "event_type": event_type,
         "payload": data,
         "trace_id": trace_id,
         "timestamp": event_time,
-        "id": f"{event_type}_{datetime.utcnow().timestamp()}",  # UNIQUE EVENT ID
+        "id": event_id,
     }
 
-    # --- Broadcast to SSE clients ---
+    # SSE broadcast
     for queue in clients:
         try:
             await queue.put(event_payload)
         except Exception as e:
-            logger.warning(f"[SSE ERROR] Failed to send event: {e}")
+            logger.warning(f"[SSE ERROR] {e}")
 
-    # --- Broadcast to WebSocket clients ---
+    # WebSocket broadcast
     await manager.broadcast(event_payload)
 
-    # --- Local mode logging ---
     if not USE_AWS:
-        logger.info(f"[LOCAL EVENT] {event_type}: {json.dumps(data, indent=2)}")
+        logger.info(f"[LOCAL EVENT] {event_payload}")
         return
 
-    # --- AWS mode (SQS + EventBridge) ---
+    # AWS SQS + EventBridge
     try:
         async with session.client("sqs", region_name=AWS_REGION) as sqs, \
                    session.client("events", region_name=AWS_REGION) as eventbridge:
 
+            # SQS Routing
             for service_name in EVENT_TARGETS.get(event_type, []):
                 queue_url = SERVICE_QUEUE_MAP.get(service_name)
                 if not queue_url:
-                    logger.warning(f"[WARN] {service_name} queue not set, skipping")
+                    logger.warning(f"[WARN] Missing queue for {service_name}")
                     continue
+
                 try:
                     await sqs.send_message(
                         QueueUrl=queue_url,
-                        MessageBody=json.dumps(event_payload),
+                        MessageBody=json.dumps(event_payload)
                     )
-                    logger.info(f"[SQS SENT → {service_name}] {event_type}")
+                    logger.info(f"[SQS → {service_name}] {event_type}")
                 except Exception as e:
                     logger.warning(f"[SQS ERROR → {service_name}] {e}")
 
@@ -101,38 +107,36 @@ async def publish_event(event_type: str, data: dict, trace_id: str = None):
                             "EventBusName": EVENT_BUS,
                         }]
                     )
-                    logger.info(f"[EventBridge] Published {event_type}")
+                    logger.info(f"[EventBridge] {event_type}")
                 except Exception as e:
                     logger.warning(f"[EventBridge ERROR] {e}")
 
     except Exception as e:
-        logger.error(f"[EVENT ERROR] Failed to publish {event_type}: {e}")
+        logger.error(f"[EVENT ERROR] {e}")
 
 
 async def log_event_to_db(event_type: str, data: dict, source_service: str):
-    """
-    Stores event_id in processed_events for idempotency.
-    """
+    """ Idempotency storage for processed events """
     event_id = data.get("id") or data.get("event_id")
     if not event_id:
-        logger.warning(f"[WARN] Missing event ID for {event_type}")
-        return True  # process anyway
+        return True
 
-    # Check for duplicates
-    query_check = processed_events.select().where(processed_events.c.event_id == event_id)
-    existing = await database.fetch_one(query_check)
+    existing = await database.fetch_one(
+        processed_events.select().where(processed_events.c.event_id == event_id)
+    )
 
     if existing:
-        logger.info(f"[SKIP] Duplicate {event_type} ({event_id}) — already handled by {source_service}")
+        logger.info(f"[SKIP] Duplicate {event_type} ({event_id})")
         return False
 
-    # Insert new event record
-    query_insert = processed_events.insert().values(
-        event_id=event_id,
-        event_type=event_type,
-        source_service=source_service,
-        processed_at=datetime.utcnow(),
+    await database.execute(
+        processed_events.insert().values(
+            event_id=event_id,
+            event_type=event_type,
+            source_service=source_service,
+            processed_at=datetime.utcnow(),
+        )
     )
-    await database.execute(query_insert)
-    logger.info(f"[LOGGED] {event_type} ({event_id}) from {source_service}")
+
+    logger.info(f"[LOGGED] {event_type} ({event_id})")
     return True

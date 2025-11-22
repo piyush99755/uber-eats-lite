@@ -11,6 +11,10 @@ from dotenv import load_dotenv
 from jose import jwt
 from passlib.context import CryptContext
 import httpx
+from shared.auth import get_optional_user
+import sys
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Internal
 from database import database, engine, metadata

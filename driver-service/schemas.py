@@ -19,3 +19,14 @@ class Driver(DriverBase):
         
 class VehicleUpdate(BaseModel):
     vehicle: str
+    
+class DeliveryHistory(BaseModel):
+    id: str
+    driver_id: str
+    order_id: str
+    items: list
+    total: float
+    delivered_at: datetime
+
+    class Config:
+        orm_mode = True

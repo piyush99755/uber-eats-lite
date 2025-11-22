@@ -10,6 +10,7 @@ from consumer import poll_sqs
 from events import publish_event
 from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
 from trace import get_or_create_trace_id
+from shared.auth import get_optional_user
 
 app = FastAPI(title="Notification Service")
 
