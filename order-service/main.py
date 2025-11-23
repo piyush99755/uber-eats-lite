@@ -1,10 +1,10 @@
-# main.py
+# main.py — rewritten with publish_order_created_event
 import uuid
 import asyncio
 import json
 import os
 import logging
-import jwt  # PyJWT
+import jwt
 from typing import List, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect, Query
@@ -14,8 +14,7 @@ from fastapi.responses import StreamingResponse
 from database import database
 from models import orders, event_logs
 from schemas import OrderCreate, Order, EventLog, OrderUpdate
-from events import publish_event
-# import handlers & poll_queue from consumer (no circular import)
+from events import publish_order_created_event
 from consumer import (
     poll_queue,
     handle_payment_completed,
@@ -23,7 +22,7 @@ from consumer import (
     handle_driver_failed,
     handle_driver_pending
 )
-from ws_manager import manager  # WebSocket manager
+from ws_manager import manager
 from shared.auth import get_optional_user
 from sse_clients import clients
 from datetime import datetime
@@ -84,13 +83,11 @@ async def startup():
     logger.info("Connecting database...")
     await database.connect()
 
-    # load envs (again) and queue urls
     PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL")
     DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
     ORDER_DELIVERED_QUEUE_URL = os.getenv("ORDER_DELIVERED_QUEUE_URL")
 
-    # Start pollers using consumer.poll_queue (non-blocking background tasks)
-    # Payment queue: only handle payment.completed
+    # Start SQS pollers
     asyncio.create_task(
         poll_queue(
             PAYMENT_QUEUE_URL,
@@ -100,7 +97,6 @@ async def startup():
     )
     logger.info("🚀 Started SQS payment queue consumer")
 
-    # Driver queue: driver events handled here
     asyncio.create_task(
         poll_queue(
             DRIVER_QUEUE_URL,
@@ -116,7 +112,6 @@ async def startup():
     )
     logger.info("🚀 Started SQS driver queue consumer")
 
-    # Optional order-delivered queue
     if ORDER_DELIVERED_QUEUE_URL:
         asyncio.create_task(
             poll_queue(
@@ -147,25 +142,32 @@ async def health():
 async def create_order(order: OrderCreate, user=Depends(get_current_user), request: Request = None):
     trace_id = request.state.trace_id
     order_id = str(uuid.uuid4())
-    query = orders.insert().values(
-        id=order_id,
-        user_id=order.user_id,
-        items=json.dumps(order.items),
-        total=order.total,
-        status="pending",
-        payment_status="pending",
-        driver_id=None,
+
+    await database.execute(
+        orders.insert().values(
+            id=order_id,
+            user_id=order.user_id,
+            items=json.dumps(order.items),
+            total=order.total,
+            status="pending",
+            payment_status="pending",
+            driver_id=None,
+        )
     )
-    await database.execute(query)
-    payload = {
+
+    order_data = {
         "id": order_id,
         "user_id": order.user_id,
         "items": order.items,
-        "total": order.total,
+        "total_amount": order.total,
         "status": "pending",
         "payment_status": "pending",
+        "driver_id": None,
     }
-    await publish_event("order.created", payload, trace_id=trace_id)
+
+    # Use the new publish_order_created_event
+    await publish_order_created_event(order_data, trace_id=trace_id)
+
     logger.info(f"[TRACE {trace_id}] ✅ Order {order_id} created by {user['id']}")
     return Order(id=order_id, status="pending", payment_status="pending", **order.dict())
 
@@ -228,11 +230,10 @@ async def delete_order(order_id: str, user=Depends(get_current_user), request: R
     existing = await database.fetch_one(orders.select().where(orders.c.id == order_id))
     if not existing:
         raise HTTPException(status_code=404, detail="Order not found")
-    
-    # Only allow admin or order owner
+
     if user["role"] != "admin" and existing["user_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="Forbidden: not owner or admin")
-    
+
     await database.execute(orders.delete().where(orders.c.id == order_id))
     await publish_event("order.deleted", {"id": order_id}, trace_id=trace_id)
     logger.info(f"[TRACE {trace_id}] 🗑️ Order {order_id} deleted by {user['id']}")
@@ -270,7 +271,7 @@ async def websocket_orders(websocket: WebSocket):
         manager.disconnect(websocket)
 
 # ----------------------------------------------------------------------
-# SSE endpoint (ready for API Gateway proxy)
+# SSE endpoint
 # ----------------------------------------------------------------------
 @app.get("/orders/orders/events/stream")
 async def sse_orders(token: str = Query(...)):
@@ -294,21 +295,22 @@ async def sse_orders(token: str = Query(...)):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+# ----------------------------------------------------------------------
+# Local webhook for payments
+# ----------------------------------------------------------------------
 @app.post("/webhook/payment")
 async def webhook_payment(request: Request):
-    """
-    Receives payment events from payment-service (local dev mode)
-    """
     body = await request.json()
     payload = body.get("data", {})
     trace_id = body.get("trace_id") or "local"
 
-    # call the shared consumer handler directly for local tests
     await handle_payment_completed(payload)
-
     logger.info(f"[LOCAL WEBHOOK] payment event received, trace_id={trace_id}")
     return {"status": "ok"}
 
+# ----------------------------------------------------------------------
+# Deliver order endpoint
+# ----------------------------------------------------------------------
 @app.post("/orders/{order_id}/deliver")
 async def deliver_order(order_id: str, user=Depends(get_optional_user)):
     driver_id = user.get("id")
@@ -324,7 +326,7 @@ async def deliver_order(order_id: str, user=Depends(get_optional_user)):
 
     if order.get("status") == "delivered":
         return {"status": "already_delivered", "order_id": order_id}
-    
+
     items = order.get("items")
     try:
         items = json.loads(items)

@@ -9,6 +9,7 @@ from database import database
 from models import processed_events
 from sse_clients import clients
 from ws_manager import manager
+import uuid
 
 load_dotenv()
 
@@ -21,67 +22,79 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
 NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
 PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL")
+ORDER_QUEUE_URL = os.getenv("ORDER_PAYMENT_QUEUE_URL")  # order-service internal queue
 EVENT_BUS = os.getenv("EVENT_BUS_NAME")
 
 session = aioboto3.Session()
 
-# Event routing table
+# Explicit routing
 EVENT_TARGETS = {
     "order.created": ["Notification Service", "Driver Service", "Payment Service"],
-    "order.updated": ["Notification Service", "Driver Service", "Payment Service"],
+    "order.updated": ["Driver Service", "Notification Service"],  # send to driver for assignment
     "order.deleted": ["Notification Service", "Driver Service"],
-    "payment.completed": ["Driver Service"],   # correct fix
+    "payment.completed": ["Order Service"],  # only order-service
 }
 
 SERVICE_QUEUE_MAP = {
     "Notification Service": NOTIFICATION_QUEUE_URL,
     "Driver Service": DRIVER_QUEUE_URL,
     "Payment Service": PAYMENT_QUEUE_URL,
+    "Order Service": ORDER_QUEUE_URL,
 }
 
 
-async def publish_event(event_type: str, data: dict, trace_id: str = None):
+import uuid
+from datetime import datetime
+
+async def publish_order_created_event(order: dict, trace_id: str = None):
     """
-    Publishes event to:
-    - SSE
-    - WebSocket
-    - SQS queues
-    - EventBridge (optional)
+    Publish an 'order.created' event to all relevant services:
+    Notification, Driver, Payment.
+    Ensures order_id and other essential fields are always included.
     """
+    order_id = order.get("id")
+    if not order_id:
+        logger.error("[publish_order_created_event] ❌ Missing order id in order object")
+        return
 
-    event_time = datetime.utcnow().isoformat()
-
-    event_id = data.get("event_id") or f"{event_type}_{datetime.utcnow().timestamp()}"
-
-    event_payload = {
-        "event_type": event_type,
-        "payload": data,
-        "trace_id": trace_id,
-        "timestamp": event_time,
-        "id": event_id,
+    # Build payload with essential order info
+    event_data = {
+        "order_id": order_id,
+        "user_id": order.get("user_id"),
+        "status": order.get("status", "pending"),
+        "payment_status": order.get("payment_status", "unpaid"),
+        "driver_id": order.get("driver_id"),
+        "items": order.get("items", []),
+        "total_amount": order.get("total_amount"),
+        "event_id": f"order.created_{uuid.uuid4()}"  # ✅ guaranteed unique
     }
 
-    # SSE broadcast
+    # Build event payload wrapper
+    event_payload = {
+        "event_type": "order.created",
+        "payload": event_data,
+        "trace_id": trace_id,
+        "timestamp": datetime.utcnow().isoformat(),
+        "id": event_data["event_id"]
+    }
+
+    # Broadcast to WebSocket and SSE clients
     for queue in clients:
         try:
             await queue.put(event_payload)
         except Exception as e:
             logger.warning(f"[SSE ERROR] {e}")
 
-    # WebSocket broadcast
     await manager.broadcast(event_payload)
 
     if not USE_AWS:
         logger.info(f"[LOCAL EVENT] {event_payload}")
         return
 
-    # AWS SQS + EventBridge
+    # Send to SQS queues
     try:
-        async with session.client("sqs", region_name=AWS_REGION) as sqs, \
-                   session.client("events", region_name=AWS_REGION) as eventbridge:
-
-            # SQS Routing
-            for service_name in EVENT_TARGETS.get(event_type, []):
+        async with session.client("sqs", region_name=AWS_REGION) as sqs:
+            for service_name in EVENT_TARGETS.get("order.created", []):
                 queue_url = SERVICE_QUEUE_MAP.get(service_name)
                 if not queue_url:
                     logger.warning(f"[WARN] Missing queue for {service_name}")
@@ -92,24 +105,9 @@ async def publish_event(event_type: str, data: dict, trace_id: str = None):
                         QueueUrl=queue_url,
                         MessageBody=json.dumps(event_payload)
                     )
-                    logger.info(f"[SQS → {service_name}] {event_type}")
+                    logger.info(f"[SQS → {service_name}] order.created (event_id={event_payload['id']})")
                 except Exception as e:
                     logger.warning(f"[SQS ERROR → {service_name}] {e}")
-
-            # Optional EventBridge
-            if EVENT_BUS and os.getenv("USE_EVENTBRIDGE", "false").lower() in ("true", "1", "yes"):
-                try:
-                    await eventbridge.put_events(
-                        Entries=[{
-                            "Source": "order-service",
-                            "DetailType": event_type,
-                            "Detail": json.dumps(data),
-                            "EventBusName": EVENT_BUS,
-                        }]
-                    )
-                    logger.info(f"[EventBridge] {event_type}")
-                except Exception as e:
-                    logger.warning(f"[EventBridge ERROR] {e}")
 
     except Exception as e:
         logger.error(f"[EVENT ERROR] {e}")

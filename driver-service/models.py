@@ -34,3 +34,13 @@ delivery_history = Table(
     Column("total", Float),
     Column("delivered_at", DateTime, default=datetime.utcnow),
 )
+
+driver_orders = Table(
+    "driver_orders",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("driver_id", String, nullable=True),
+    Column("status", String, nullable=False),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
+)

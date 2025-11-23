@@ -170,6 +170,14 @@ async def health():
 
 @app.post("/signup")
 async def signup(req: SignupRequest):
+    # Validate driver fields before anything
+    if req.role == Role.driver:
+        if not req.vehicle or not req.license_number:
+            raise HTTPException(
+                status_code=400,
+                detail="Driver must provide vehicle and license_number"
+            )
+
     # Check if email exists
     existing = await database.fetch_one(
         auth_users.select().where(auth_users.c.email == req.email)
@@ -179,41 +187,46 @@ async def signup(req: SignupRequest):
 
     # Create user
     user_id = str(uuid.uuid4())
-    await database.execute(
-        auth_users.insert().values(
-            id=user_id,
-            email=req.email,
-            password_hash=hash_password(req.password),
-            role=req.role.value
+    try:
+        await database.execute(
+            auth_users.insert().values(
+                id=user_id,
+                email=req.email,
+                password_hash=hash_password(req.password),
+                role=req.role.value
+            )
         )
-    )
-    logger.info(f"[Auth] Created new user: {req.email}")
-
-    # Fire-and-forget sync to user-service
-    asyncio.create_task(sync_user_to_user_service(user_id, req.name, req.email, req.role.value))
+        logger.info(f"[Auth] Created new user: {req.email}")
+    except Exception as e:
+        logger.error(f"[Auth] Failed to create user: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create user")
 
     # If driver, register driver record
     if req.role == Role.driver:
-        if not req.vehicle or not req.license_number:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "Driver must provide vehicle and license_number"}
-            )
-
         driver_payload = {
             "id": user_id,
             "name": req.name,
             "vehicle": req.vehicle,
             "license_number": req.license_number
         }
-
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await forward_with_retries(client, "POST", DRIVER_SERVICE_URL, json=driver_payload)
                 if resp.status_code >= 400:
-                    logger.error(f"[DriverService] Error {resp.status_code}: {resp.text}")
+                    # Rollback user creation
+                    await database.execute(auth_users.delete().where(auth_users.c.id == user_id))
+                    logger.error(f"[DriverService] Failed to create driver: {resp.status_code} {resp.text}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Driver creation failed: {resp.text}"
+                    )
         except Exception as e:
-            logger.error(f"[DriverService] Call failed: {e}")
+            await database.execute(auth_users.delete().where(auth_users.c.id == user_id))
+            logger.error(f"[DriverService] Exception creating driver: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="Driver creation failed, user signup rolled back"
+            )
 
     # Return JWT
     token = create_jwt(user_id, req.role.value)

@@ -14,8 +14,8 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL")           # internal payments
 NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
 USER_QUEUE_URL = os.getenv("USER_QUEUE_URL")
+DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
 ORDER_PAYMENT_QUEUE_URL = os.getenv("ORDER_PAYMENT_QUEUE_URL")  # order-service queue
-DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")                # driver-service queue
 
 ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order-service:8000")
 
@@ -34,24 +34,28 @@ async def publish_event(event_type: str, payload: dict, trace_id: str = None):
     }
 
     if not USE_AWS:
-        webhook_url = f"{ORDER_SERVICE_URL}/webhook/payment"
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.post(webhook_url, json=message)
-            print(f"[LOCAL EVENT → ORDER] {event_type} sent to {webhook_url} (event_id={message_id})")
-        except Exception as e:
-            print(f"[LOCAL EVENT ERROR] {event_type}: {e}")
+        # Local delivery via webhook to order-service only
+        if event_type == "payment.completed":
+            webhook_url = f"{ORDER_SERVICE_URL}/webhook/payment"
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post(webhook_url, json=message)
+                print(f"[LOCAL EVENT → ORDER] {event_type} sent to {webhook_url} (event_id={message_id})")
+            except Exception as e:
+                print(f"[LOCAL EVENT ERROR] {event_type}: {e}")
+        else:
+            print(f"[LOCAL EVENT] {event_type} skipped for local delivery")
         return
 
-    # Determine SQS queues
+    # AWS SQS delivery
     queue_urls = []
+
+    # Only send payment.completed to order-service queue
     if event_type == "payment.completed":
         if ORDER_PAYMENT_QUEUE_URL:
-            queue_urls.append(ORDER_PAYMENT_QUEUE_URL)   # for order-service
+            queue_urls.append(ORDER_PAYMENT_QUEUE_URL)
         if DRIVER_QUEUE_URL:
-            queue_urls.append(DRIVER_QUEUE_URL)          # for driver-service
-        if PAYMENT_QUEUE_URL:
-            queue_urls.append(PAYMENT_QUEUE_URL) 
+            queue_urls.append(DRIVER_QUEUE_URL)
     elif event_type.startswith("payment."):
         if PAYMENT_QUEUE_URL:
             queue_urls.append(PAYMENT_QUEUE_URL)

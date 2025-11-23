@@ -15,28 +15,27 @@ logger.setLevel(logging.INFO)
 USE_AWS = os.getenv("USE_AWS", "False").lower() in ("true", "1", "yes")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# support both names (env might use ORDER_QUEUE_URL or ORDER_SERVICE_QUEUE)
-ORDER_QUEUE_URL = os.getenv("ORDER_QUEUE_URL") or os.getenv("ORDER_SERVICE_QUEUE")
+# Queues
+ORDER_QUEUE_URL = os.getenv("ORDER_QUEUE_URL")  # driver events → order-service
 NOTIFICATION_QUEUE_URL = os.getenv("NOTIFICATION_QUEUE_URL")
-PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL")
+PAYMENT_QUEUE_URL = os.getenv("PAYMENT_QUEUE_URL")  # optional if needed
 EVENT_BUS = os.getenv("EVENT_BUS_NAME")
 
 session = aioboto3.Session()
 
 
 async def broadcast_ws_event_stub(event_type: str, data: dict):
-    # placeholder — original code had websocket clients set, if you use it keep same
+    # placeholder — optional WS broadcast
     return
 
 
 async def publish_event(event_type: str, data: dict, trace_id: str = None, broadcast_ws: bool = True):
     """
-    Publish an event to configured SQS queues (Order / Notification / Payment).
-    Ensures an event_id exists and injects it into payload for consumers.
+    Publish an event to configured queues (Order / Notification / Payment).
+    Ensures event_id exists and injects it into payload for idempotency.
     """
     event_time = datetime.utcnow().isoformat()
     event_id = data.get("event_id") or data.get("id") or f"{event_type}_{datetime.utcnow().timestamp()}"
-    # ensure payload contains event_id for downstream idempotency
     data_with_id = dict(data)
     data_with_id.setdefault("event_id", event_id)
 
@@ -49,7 +48,7 @@ async def publish_event(event_type: str, data: dict, trace_id: str = None, broad
         "trace_id": trace_id,
     }
 
-    # broadcast to any local WS clients if you have them
+    # optional WS broadcast
     if broadcast_ws:
         try:
             await broadcast_ws_event_stub(event_type, data_with_id)
@@ -65,16 +64,23 @@ async def publish_event(event_type: str, data: dict, trace_id: str = None, broad
         async with session.client("sqs", region_name=AWS_REGION) as sqs, \
                    session.client("events", region_name=AWS_REGION) as eventbridge:
 
-            targets = [
-                ("Order Service", ORDER_QUEUE_URL),
-                ("Notification Service", NOTIFICATION_QUEUE_URL),
-                ("Payment Service", PAYMENT_QUEUE_URL),
-            ]
+            # Decide which queues to send each event to
+            targets = []
 
+            if event_type.startswith("driver."):
+                # Driver events mainly go to order-service queue and optionally notification
+                if ORDER_QUEUE_URL:
+                    targets.append(("Order Service", ORDER_QUEUE_URL))
+                if NOTIFICATION_QUEUE_URL:
+                    targets.append(("Notification Service", NOTIFICATION_QUEUE_URL))
+
+            elif event_type.startswith("payment.") or event_type.startswith("order."):
+                # For driver-service emitting downstream events if needed
+                if PAYMENT_QUEUE_URL:
+                    targets.append(("Payment Service", PAYMENT_QUEUE_URL))
+
+            # send to SQS queues
             for name, url in targets:
-                if not url:
-                    logger.debug(f"[SQS SKIP] {name} queue not configured")
-                    continue
                 try:
                     await sqs.send_message(QueueUrl=url, MessageBody=json.dumps(message_body))
                     logger.info(f"[SQS SENT → {name}] {event_type} (event_id={event_id})")
@@ -104,29 +110,3 @@ async def publish_event(event_type: str, data: dict, trace_id: str = None, broad
     return sent_any
 
 
-async def log_event_to_db(event_type: str, data: dict, source_service: str):
-    """
-    Logs event_id to processed_events table for idempotency.
-    Returns True if new event, False if duplicate (so caller can skip processing).
-    """
-    from models import processed_events  # local import to avoid cycles
-    event_id = data.get("event_id") or data.get("id")
-    if not event_id:
-        logger.warning(f"[WARN] Event missing ID → {event_type}")
-        return True
-
-    query_check = processed_events.select().where(processed_events.c.event_id == event_id)
-    existing = await database.fetch_one(query_check)
-    if existing:
-        logger.info(f"[SKIP] Duplicate event ({event_id}) from {source_service}")
-        return False
-
-    query_insert = processed_events.insert().values(
-        event_id=event_id,
-        event_type=event_type,
-        source_service=source_service,
-        processed_at=datetime.utcnow(),
-    )
-    await database.execute(query_insert)
-    logger.info(f"[LOGGED] {event_type} ({event_id}) from {source_service}")
-    return True
