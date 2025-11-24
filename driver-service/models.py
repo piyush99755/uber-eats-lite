@@ -1,5 +1,7 @@
 # models.py
-from sqlalchemy import Table, Column, String, DateTime, Float, Text, MetaData
+import uuid
+from sqlalchemy import Table, Column, String, DateTime, Float, Text, MetaData, ForeignKey
+from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime
 
 # Define metadata here
@@ -43,4 +45,15 @@ driver_orders = Table(
     Column("status", String, nullable=False),
     Column("created_at", DateTime, default=datetime.utcnow),
     Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
+    Column("delivered_at", DateTime, nullable=True),
+)
+
+driver_orders_history = Table(
+    "driver_orders_history",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
+    Column("order_id", String, nullable=False),
+    Column("driver_id", UUID(as_uuid=True), ForeignKey("drivers.id"), nullable=False),
+    Column("status", String, nullable=False),
+    Column("created_at", DateTime, nullable=False),
 )

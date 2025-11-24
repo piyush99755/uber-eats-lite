@@ -96,7 +96,7 @@ async def register_driver(driver: DriverCreate, id: str = None):
         name=driver.name,
         vehicle=driver.vehicle,
         license_number=driver.license_number,
-        status="active"
+        status="available" 
     )
 
     try:
@@ -106,7 +106,8 @@ async def register_driver(driver: DriverCreate, id: str = None):
     except IntegrityError:
         raise HTTPException(status_code=400, detail="Driver already exists")
 
-    return {**driver.dict(), "id": driver_id, "status": "active"}
+    # Return the driver with correct status
+    return {**driver.dict(), "id": driver_id, "status": "available"}
 
 @app.get("/drivers/{driver_id}", response_model=Driver)
 async def get_driver(driver_id: str):
