@@ -42,9 +42,10 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     print("[Driver Service] Starting up...")
-    metadata.create_all(engine)  # Ensure tables exist
+    metadata.create_all(engine)
     await database.connect()
     print("[Driver Service] DB connected.")
+    # Start the consumer as background task
     asyncio.create_task(start_driver_consumer())
     print("[Driver Service] Consumer started in background")
 

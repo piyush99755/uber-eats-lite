@@ -332,15 +332,14 @@ async def start_driver_consumer():
         await database.connect()
 
     logger.info("[Driver Consumer] Starting poller...")
-    asyncio.create_task(
-        poll_queue(
-            DRIVER_QUEUE_URL,
-            {
-                "order.created": handle_order_created,
-                "payment.completed": handle_payment_completed,
-                "order.delivered": handle_order_delivered,
-            }
-        )
+    # Directly run the poller (it loops forever)
+    await poll_queue(
+        DRIVER_QUEUE_URL,
+        {
+            "order.created": handle_order_created,
+            "payment.completed": handle_payment_completed,
+            "order.delivered": handle_order_delivered,
+        }
     )
 
 
