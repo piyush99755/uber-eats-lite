@@ -47,6 +47,15 @@ app.add_middleware(
 # --------------------------------------------------
 JWT_SECRET = os.getenv("JWT_SECRET", "demo_secret")
 JWT_ALGORITHM = "HS256"
+# --------------------------------------------------
+# Demo admin user for portfolio/demo purposes
+# --------------------------------------------------
+DEMO_ADMIN = {
+    "email": "admin@demo.com",
+    "password": "admin123",
+    "role": "admin",
+    "id": "00000000-0000-0000-0000-000000000000"
+}
 
 SERVICES = {
     "auth": "http://auth-service:8005",
@@ -257,13 +266,49 @@ async def signup(request: Request):
 @app.post("/login")
 async def login(request: Request):
     """
-    Forward login request to auth-service. If user is a driver,
-    fetch driver record from driver-service and include it in the response.
+    Login endpoint supporting:
+    1. Demo admin account
+    2. Normal users via auth-service
+    3. Drivers with driver info attached
     """
     data = await request.json()
     trace_id = request.headers.get("x-trace-id") or str(uuid.uuid4())
 
-    # 1️⃣ Forward login to auth-service
+    # -------------------------
+    # 1️⃣ Check for demo admin
+    # -------------------------
+    if data.get("email") == DEMO_ADMIN["email"] and data.get("password") == DEMO_ADMIN["password"]:
+        from datetime import datetime, timedelta
+
+        token = jwt.encode(
+            {
+                "sub": DEMO_ADMIN["id"],
+                "role": DEMO_ADMIN["role"],
+                "exp": datetime.utcnow() + timedelta(hours=2),
+            },
+            JWT_SECRET,
+            algorithm=JWT_ALGORITHM
+        )
+
+        logger.info(f"[TRACE {trace_id}] Demo admin logged in: {DEMO_ADMIN['id']}")
+        return Response(
+            content=json.dumps({
+                "success": True,
+                "data": {
+                    "token": token,
+                    "role": DEMO_ADMIN["role"],
+                    "email": DEMO_ADMIN["email"]
+                },
+                "message": "Login successful (demo admin)"
+            }),
+            status_code=200,
+            media_type="application/json",
+            headers={"x-trace-id": trace_id},
+        )
+
+    # -------------------------
+    # 2️⃣ Forward login to auth-service
+    # -------------------------
     async with httpx.AsyncClient() as client:
         try:
             auth_resp = await client.post(
@@ -279,7 +324,9 @@ async def login(request: Request):
                 media_type="application/json",
             )
 
-    # 2️⃣ Propagate auth-service error
+    # -------------------------
+    # 3️⃣ Propagate auth-service error
+    # -------------------------
     if auth_resp.status_code >= 400:
         return Response(
             content=auth_resp.content,
@@ -287,7 +334,9 @@ async def login(request: Request):
             media_type=auth_resp.headers.get("content-type", "application/json"),
         )
 
-    # 3️⃣ Parse auth response
+    # -------------------------
+    # 4️⃣ Parse auth response
+    # -------------------------
     try:
         auth_data = auth_resp.json()
         token = auth_data.get("data", {}).get("token")
@@ -303,7 +352,9 @@ async def login(request: Request):
         role = None
         user_id = None
 
-    # 4️⃣ If driver, fetch driver record
+    # -------------------------
+    # 5️⃣ If driver, fetch driver record
+    # -------------------------
     driver_info = None
     if role == "driver" and user_id:
         try:
@@ -319,7 +370,9 @@ async def login(request: Request):
         except Exception as e:
             logger.error(f"Failed to fetch driver info: {e}")
 
-    # 5️⃣ Build final response
+    # -------------------------
+    # 6️⃣ Build final response
+    # -------------------------
     final_data = auth_data.get("data", {})
     if driver_info:
         final_data["driver"] = driver_info
@@ -330,6 +383,7 @@ async def login(request: Request):
         media_type="application/json",
         headers={"x-trace-id": trace_id},
     )
+
     
     
 async def proxy_request(service_name: str, path: str, request: Request):
@@ -405,6 +459,20 @@ async def driver_deliveries_history(request: Request):
         f"drivers/{driver_id}/deliveries/history",  
         request
     )
+    
+#fetching all drivers for admin role..
+@app.get("/drivers/all")
+async def admin_get_all_drivers(request: Request):
+    auth_header = request.headers.get("authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    token = auth_header.split(" ")[1]
+    user = decode_jwt(token)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    return await proxy_request("drivers", "drivers", request)  # your driver-service should return all drivers at /drivers
 
 @app.post("/drivers/internal/register")
 async def proxy_internal_register(request: Request):
@@ -451,7 +519,12 @@ async def proxy(request: Request, service: str, path: str = ""):
         role = user_claims.get("role")
         user_id = user_claims.get("sub")
 
-        if service == "drivers" and role != "driver":
+        # Admin can access everything
+        if role == "admin":
+            pass  # skip all role checks
+
+        # Driver-specific check
+        elif service == "drivers" and role != "driver":
             return Response(
                 content=json.dumps({"error": "Driver privileges required"}),
                 status_code=403,
@@ -459,7 +532,8 @@ async def proxy(request: Request, service: str, path: str = ""):
                 headers=cors_headers,
             )
 
-        if service == "users" and role != "user":
+        # User-specific check
+        elif service == "users" and role != "user":
             return Response(
                 content=json.dumps({"error": "User privileges required"}),
                 status_code=403,

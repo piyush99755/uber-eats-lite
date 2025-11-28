@@ -16,7 +16,6 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ role, onLogout }: SidebarProps) {
-
   // Base user links
   const links: { name: string; path: string; icon: JSX.Element }[] = [];
 
@@ -29,6 +28,7 @@ export default function Sidebar({ role, onLogout }: SidebarProps) {
 
   if (role === "admin") {
     links.push(
+      { name: "Orders", path: "/orders", icon: <ShoppingBag size={18} /> }, // ✅ Admin can see orders
       { name: "Users", path: "/users", icon: <Users size={18} /> },
       { name: "Drivers", path: "/drivers", icon: <Truck size={18} /> },
       { name: "Events", path: "/events", icon: <Bell size={18} /> }
@@ -68,7 +68,7 @@ export default function Sidebar({ role, onLogout }: SidebarProps) {
         <button
           onClick={() => {
             if (!confirm("Delete your driver profile permanently?")) return;
-            // You can handle this in DriverProfile or here later
+            // Handle deletion here or in DriverProfile
           }}
           className="mt-2 bg-red-500 hover:bg-red-600 text-white p-2 rounded flex items-center gap-2"
         >

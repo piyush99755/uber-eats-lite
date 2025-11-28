@@ -13,17 +13,22 @@ interface Driver {
   status?: string;
 }
 
-export default function Drivers() {
+interface DriversProps {
+  role: string | null;
+}
+
+export default function Drivers({ role }: DriversProps) {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [error, setError] = useState("");
   const [showModal, setShowModal] = useState(false);
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState({ name: "", vehicle: "", license_number: "" });
-  const [editingId, setEditingId] = useState<string | null>(null); // <-- track editing
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const fetchDrivers = async () => {
     try {
-      const res = await api.get<Driver[]>("/drivers");
+      const endpoint = role === "admin" ? "/drivers/all" : "/drivers"; // admin fetch all
+      const res = await api.get<Driver[]>(endpoint);
       setDrivers([...res.data].reverse());
       setError("");
     } catch (err) {
@@ -34,7 +39,7 @@ export default function Drivers() {
 
   useEffect(() => {
     fetchDrivers();
-  }, []);
+  }, [role]);
 
   const handleOpenEdit = (driver: Driver) => {
     setForm({
@@ -55,14 +60,12 @@ export default function Drivers() {
     setLoading(true);
     try {
       if (editingId) {
-        // Update existing driver
         const res = await api.put<Driver>(`/drivers/${editingId}`, form);
         setDrivers((prev) =>
           prev.map((d) => (d.id === editingId ? res.data : d))
         );
         toast.success("Driver updated successfully");
       } else {
-        // Create new driver
         const res = await api.post<Driver>("/drivers", form);
         setDrivers((prev) => [res.data, ...prev]);
         toast.success("Driver added successfully");
@@ -101,25 +104,16 @@ export default function Drivers() {
       <div className="grid gap-3">
         {drivers.length ? (
           drivers.map((driver, i) => (
-            <div
-              key={driver.id || driver.license_number || i}
-              className="border rounded-lg p-4 bg-white shadow"
-            >
+            <div key={driver.id || driver.license_number || i} className="border rounded-lg p-4 bg-white shadow">
               <p className="font-semibold">{driver.name || "Unnamed Driver"}</p>
               <p className="text-gray-500 text-sm">{driver.vehicle || "Unknown Vehicle"}</p>
-              <p className="text-sm text-gray-400">
-                License: {driver.license_number || "N/A"}
-              </p>
+              <p className="text-sm text-gray-400">License: {driver.license_number || "N/A"}</p>
               <p className={`text-sm font-medium mt-1 ${driver.status === "available" ? "text-green-600" : "text-yellow-500"}`}>
                 {driver.status || "unknown"}
               </p>
               <div className="flex gap-2 mt-3">
-                <Button onClick={() => handleOpenEdit(driver)} className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded">
-                  ✏️ Edit
-                </Button>
-                <Button onClick={() => handleDeleteDriver(driver.id)} className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded">
-                  🗑 Delete
-                </Button>
+                <Button onClick={() => handleOpenEdit(driver)} className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded">✏️ Edit</Button>
+                <Button onClick={() => handleDeleteDriver(driver.id)} className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded">🗑 Delete</Button>
               </div>
             </div>
           ))
@@ -129,30 +123,10 @@ export default function Drivers() {
       </div>
 
       <Modal show={showModal} onClose={() => setShowModal(false)} title={editingId ? "Edit Driver" : "Add New Driver"}>
-        <input
-          type="text"
-          placeholder="Name"
-          value={form.name}
-          onChange={(e) => setForm({ ...form, name: e.target.value })}
-          className="border p-2 w-full mb-3 rounded"
-        />
-        <input
-          type="text"
-          placeholder="Vehicle"
-          value={form.vehicle}
-          onChange={(e) => setForm({ ...form, vehicle: e.target.value })}
-          className="border p-2 w-full mb-3 rounded"
-        />
-        <input
-          type="text"
-          placeholder="License Number"
-          value={form.license_number}
-          onChange={(e) => setForm({ ...form, license_number: e.target.value })}
-          className="border p-2 w-full mb-4 rounded"
-        />
-        <Button onClick={handleSubmit} loading={loading} className="w-full">
-          {editingId ? "Update Driver" : "Add Driver"}
-        </Button>
+        <input type="text" placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="border p-2 w-full mb-3 rounded" />
+        <input type="text" placeholder="Vehicle" value={form.vehicle} onChange={(e) => setForm({ ...form, vehicle: e.target.value })} className="border p-2 w-full mb-3 rounded" />
+        <input type="text" placeholder="License Number" value={form.license_number} onChange={(e) => setForm({ ...form, license_number: e.target.value })} className="border p-2 w-full mb-4 rounded" />
+        <Button onClick={handleSubmit} loading={loading} className="w-full">{editingId ? "Update Driver" : "Add Driver"}</Button>
       </Modal>
     </div>
   );

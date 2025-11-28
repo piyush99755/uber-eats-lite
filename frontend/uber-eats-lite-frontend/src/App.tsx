@@ -13,7 +13,10 @@ import DriverOrders from "./pages/DriverOrders";
 import DriverProfile from "./pages/DriverProfile";
 import api from "./api/api";
 
-// ProtectedRoute component
+// --------------------------------------------------
+// ProtectedRoute
+// Allows admin to access all routes
+// --------------------------------------------------
 interface ProtectedRouteProps {
   role: string | null;
   allowedRoles: string[];
@@ -21,15 +24,19 @@ interface ProtectedRouteProps {
 }
 
 function ProtectedRoute({ role, allowedRoles, children }: ProtectedRouteProps) {
-  if (!role) return <Navigate to="/" replace />; // not logged in
-  if (!allowedRoles.includes(role)) return <Navigate to="/" replace />; // unauthorized
+  if (!role) return <Navigate to="/" replace />;
+  if (role !== "admin" && !allowedRoles.includes(role)) return <Navigate to="/" replace />;
   return children;
 }
 
+// --------------------------------------------------
+// App
+// --------------------------------------------------
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
   const [role, setRole] = useState<string | null>(null);
 
+  // Decode JWT to get role
   useEffect(() => {
     if (token) {
       try {
@@ -68,7 +75,6 @@ export default function App() {
       ) : (
         <div className="flex min-h-screen bg-gray-50">
           <Sidebar role={role} onLogout={handleLogout} />
-
           <main className="flex-1 p-6 overflow-auto">
             <Routes>
               {/* Redirect root based on role */}
@@ -129,10 +135,19 @@ export default function App() {
                 }
               />
               <Route
-                path="/drivers"
+                  path="/drivers"
+                  element={
+                    <ProtectedRoute role={role} allowedRoles={["admin"]}>
+                      <Drivers role={role} />
+                    </ProtectedRoute>
+                  }
+              />
+
+              <Route
+                path="/orders"
                 element={
-                  <ProtectedRoute role={role} allowedRoles={["admin"]}>
-                    <Drivers />
+                  <ProtectedRoute role={role} allowedRoles={["user", "admin"]}>
+                    <Orders /> {/* ✅ no role prop needed */}
                   </ProtectedRoute>
                 }
               />

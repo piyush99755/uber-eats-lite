@@ -6,8 +6,8 @@ interface LoginProps {
 }
 
 export default function Login({ onLogin }: LoginProps) {
-  const [email, setEmail] = useState<string>("");
-  const [password, setPassword] = useState<string>("");
+  const [email, setEmail] = useState<string>("admin@demo.com"); // demo admin
+  const [password, setPassword] = useState<string>("admin123");  // demo admin
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -28,14 +28,17 @@ export default function Login({ onLogin }: LoginProps) {
         localStorage.setItem("token", token);
         onLogin(token);
 
-        // decode token to check role
+        // decode JWT to get role
         const payload = JSON.parse(atob(token.split(".")[1]));
+        const role = payload.role;
 
         // redirect based on role
-        if (payload.role === "admin") {
-          navigate("/users"); // or your admin dashboard route
+        if (role === "admin") {
+          navigate("/users"); // admin dashboard
+        } else if (role === "driver") {
+          navigate("/driver/orders");
         } else {
-          navigate("/orders"); // regular user route
+          navigate("/orders"); // regular user
         }
       } else {
         alert(data.message || "Login failed");
@@ -56,9 +59,7 @@ export default function Login({ onLogin }: LoginProps) {
         type="email"
         placeholder="Email"
         value={email}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          setEmail(e.target.value)
-        }
+        onChange={(e) => setEmail(e.target.value)}
         className="mb-2 p-2 w-full border rounded"
         required
       />
@@ -66,9 +67,7 @@ export default function Login({ onLogin }: LoginProps) {
         type="password"
         placeholder="Password"
         value={password}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          setPassword(e.target.value)
-        }
+        onChange={(e) => setPassword(e.target.value)}
         className="mb-2 p-2 w-full border rounded"
         required
       />
