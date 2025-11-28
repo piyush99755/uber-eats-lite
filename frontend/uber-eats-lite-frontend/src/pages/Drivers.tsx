@@ -23,7 +23,7 @@ export default function Drivers() {
 
   const fetchDrivers = async () => {
     try {
-      const res = await api.get<Driver[]>("/drivers/drivers");
+      const res = await api.get<Driver[]>("/drivers");
       setDrivers([...res.data].reverse());
       setError("");
     } catch (err) {
@@ -56,14 +56,14 @@ export default function Drivers() {
     try {
       if (editingId) {
         // Update existing driver
-        const res = await api.put<Driver>(`/drivers/drivers/${editingId}`, form);
+        const res = await api.put<Driver>(`/drivers/${editingId}`, form);
         setDrivers((prev) =>
           prev.map((d) => (d.id === editingId ? res.data : d))
         );
         toast.success("Driver updated successfully");
       } else {
         // Create new driver
-        const res = await api.post<Driver>("/drivers/drivers", form);
+        const res = await api.post<Driver>("/drivers", form);
         setDrivers((prev) => [res.data, ...prev]);
         toast.success("Driver added successfully");
       }
@@ -80,7 +80,7 @@ export default function Drivers() {
   const handleDeleteDriver = async (id?: string) => {
     if (!id || !confirm("Delete this driver?")) return;
     try {
-      await api.delete(`/drivers/drivers/${id}`);
+      await api.delete(`/drivers/${id}`);
       setDrivers((prev) => prev.filter((d) => d.id !== id));
       toast.success("Driver deleted successfully");
     } catch {

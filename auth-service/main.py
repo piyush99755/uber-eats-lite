@@ -204,14 +204,14 @@ async def signup(req: SignupRequest):
     # If driver, register driver record
     if req.role == Role.driver:
         driver_payload = {
-            "id": user_id,
             "name": req.name,
             "vehicle": req.vehicle,
             "license_number": req.license_number
         }
+        driver_url = f"{DRIVER_SERVICE_URL}?id={user_id}"  # <<--- Pass the same ID
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                resp = await forward_with_retries(client, "POST", DRIVER_SERVICE_URL, json=driver_payload)
+                resp = await forward_with_retries(client, "POST", driver_url, json=driver_payload)
                 if resp.status_code >= 400:
                     # Rollback user creation
                     await database.execute(auth_users.delete().where(auth_users.c.id == user_id))

@@ -4,7 +4,7 @@ import json
 import asyncio
 import logging
 from jose import jwt, JWTError
-from fastapi import FastAPI, Request, Response, Query,WebSocket, Depends
+from fastapi import FastAPI, Request, Response, Query,WebSocket, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
@@ -330,6 +330,86 @@ async def login(request: Request):
         media_type="application/json",
         headers={"x-trace-id": trace_id},
     )
+    
+    
+async def proxy_request(service_name: str, path: str, request: Request):
+    service_url = SERVICES.get(service_name)
+    if not service_url:
+        raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
+
+    target_url = f"{service_url.rstrip('/')}/{path.lstrip('/')}"
+    method = request.method
+    # forward headers but remove Host (httpx will set its own)
+    headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+    # keep trace id if present or set a new one
+    headers.setdefault("x-trace-id", request.state.trace_id)
+    body = await request.body()
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        proxied_response = await client.request(method, target_url, headers=headers, content=body)
+
+    # Build Response: include content-type and other safe headers
+    media_type = proxied_response.headers.get("content-type")
+    response = Response(content=proxied_response.content,
+                        status_code=proxied_response.status_code,
+                        media_type=media_type)
+
+    # copy a small useful set of headers (avoid hop-by-hop headers)
+    for k, v in proxied_response.headers.items():
+        lower_k = k.lower()
+        if lower_k in {"content-type", "content-length", "etag", "cache-control", "x-trace-id"}:
+            response.headers[k] = v
+
+    return response
+
+# --------------------------------------------------
+# DRIVER ROUTES (Production Ready)
+# --------------------------------------------------
+@app.get("/drivers/me")
+async def driver_me(request: Request):
+    auth_header = request.headers.get("authorization")
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    token = auth_header.split(" ")[1]
+    user = decode_jwt(token)
+
+    if not user or user.get("role") != "driver":
+        raise HTTPException(status_code=403, detail="Driver privileges required")
+
+    driver_id = user.get("sub")
+
+    return await proxy_request(
+        "drivers",
+        f"drivers/{driver_id}",    
+        request
+    )
+
+
+@app.get("/drivers/deliveries/history")
+async def driver_deliveries_history(request: Request):
+    auth_header = request.headers.get("authorization")
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    token = auth_header.split(" ")[1]
+    user = decode_jwt(token)
+
+    if not user or user.get("role") != "driver":
+        raise HTTPException(status_code=403, detail="Driver privileges required")
+
+    driver_id = user.get("sub")
+
+    return await proxy_request(
+        "drivers",
+        f"drivers/{driver_id}/deliveries/history",  
+        request
+    )
+
+@app.post("/drivers/internal/register")
+async def proxy_internal_register(request: Request):
+    return await proxy_request("drivers", "internal/register", request)
+
 
 # --------------------------------------------------
 # Main proxy route
@@ -387,9 +467,7 @@ async def proxy(request: Request, service: str, path: str = ""):
                 headers=cors_headers,
             )
 
-        # Only rewrite /drivers/me → /drivers/<driver_id>
-        if service == "drivers" and path == "me" and role == "driver":
-            path = f"drivers/{user_id}"
+       
 
     # Build target URL
     target_url = f"{SERVICES[service].rstrip('/')}/{path.lstrip('/')}" if path else SERVICES[service]

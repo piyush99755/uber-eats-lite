@@ -1,21 +1,20 @@
 import asyncio
 import uuid
 import os
-from fastapi import FastAPI, HTTPException, Request, Depends, Response
+from fastapi import FastAPI, HTTPException, Request, Depends, Response, Path, Body
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, insert, select
+from sqlalchemy import insert
 from sqlalchemy.exc import IntegrityError
-from uuid import uuid4
 from typing import List, Optional, Dict, Any
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from jose import jwt, JWTError
 
 from database import database, metadata, engine
-from models import metadata, drivers
+from models import drivers, driver_orders, driver_orders_history
 from schemas import DriverCreate, Driver
 from events import publish_event
 from consumer import start_driver_consumer
-from metrics import DRIVER_EVENTS_PROCESSED, ACTIVE_DRIVERS  # import metrics
+from metrics import DRIVER_EVENTS_PROCESSED, ACTIVE_DRIVERS
 
 # -------------------------
 # FastAPI app
@@ -28,9 +27,11 @@ JWT_SECRET = os.getenv("JWT_SECRET", "demo_secret")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 # CORS (allow your API Gateway)
+origins = ["http://localhost:5173"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,18 +42,13 @@ app.add_middleware(
 # -------------------------
 @app.on_event("startup")
 async def startup():
-    print("[Driver Service] Starting up...")
     metadata.create_all(engine)
     await database.connect()
-    print("[Driver Service] DB connected.")
-    # Start the consumer as background task
     asyncio.create_task(start_driver_consumer())
-    print("[Driver Service] Consumer started in background")
 
 @app.on_event("shutdown")
 async def shutdown():
     await database.disconnect()
-    print("[Driver Service] DB disconnected.")
 
 # -------------------------
 # JWT / Auth helpers
@@ -64,59 +60,74 @@ def decode_jwt_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 async def get_optional_user(request: Request) -> Dict[str, Optional[str]]:
-    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    auth = request.headers.get("Authorization") or request.headers.get("authorization")
     trace_id = getattr(request.state, "trace_id", str(uuid.uuid4()))
+
     if not auth or not auth.lower().startswith("bearer "):
         return {"id": None, "role": None, "trace_id": trace_id}
+
     token = auth.split(" ", 1)[1].strip()
     payload = decode_jwt_token(token)
+
     if not payload:
         return {"id": None, "role": None, "trace_id": trace_id}
-    return {"id": payload.get("sub"), "role": payload.get("role"), "trace_id": trace_id}
 
-def driver_required(user=Depends(get_optional_user)):
-    if not user or user.get("role") != "driver":
-        raise HTTPException(status_code=403, detail="Drivers only")
-    if not user.get("id"):
-        raise HTTPException(status_code=401, detail="Missing user id")
-    return user
+    return {
+        "id": payload.get("sub"),  # JWT sub must match drivers.id
+        "role": payload.get("role"),
+        "trace_id": trace_id
+    }
 
 def admin_required(user=Depends(get_optional_user)):
     if not user or user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admins only")
     return user
 
+async def driver_required(user=Depends(get_optional_user)):
+    role = user.get("role")
+    driver_id = user.get("id")
+    trace_id = user.get("trace_id", "no-trace")
+
+    print(f"[DEBUG][{trace_id}] driver_required called with role={role}, driver_id={driver_id}")
+
+    if role not in ["driver", "Driver", "DRIVER"]:
+        print(f"[DEBUG][{trace_id}] Access denied: role not driver")
+        raise HTTPException(status_code=403, detail="Drivers only")
+
+    if not driver_id:
+        print(f"[DEBUG][{trace_id}] Missing driver ID in token")
+        raise HTTPException(status_code=401, detail="Missing driver id in token")
+
+    query = drivers.select().where(drivers.c.id == driver_id)
+    driver = await database.fetch_one(query)
+    if not driver:
+        print(f"[DEBUG][{trace_id}] Driver not found in DB for id={driver_id}")
+        raise HTTPException(status_code=404, detail="Driver not found")
+
+    print(f"[DEBUG][{trace_id}] Driver found: {driver}")
+    return user
+
+# -------------------------
+# Internal registration
+# -------------------------
 @app.post("/internal/register", response_model=Driver)
 async def register_driver(driver: DriverCreate, id: str = None):
-    """
-    Register a new driver (called internally by auth-service).
-    """
-    driver_id = id or str(uuid4())
+    driver_id = id or str(uuid.uuid4())
     query = insert(drivers).values(
         id=driver_id,
         name=driver.name,
         vehicle=driver.vehicle,
         license_number=driver.license_number,
-        status="available" 
+        status="available"
     )
-
     try:
         with engine.connect() as conn:
             conn.execute(query)
             conn.commit()
     except IntegrityError:
         raise HTTPException(status_code=400, detail="Driver already exists")
-
-    # Return the driver with correct status
     return {**driver.dict(), "id": driver_id, "status": "available"}
 
-@app.get("/drivers/{driver_id}", response_model=Driver)
-async def get_driver(driver_id: str):
-    query = drivers.select().where(drivers.c.id == driver_id)
-    result = await database.fetch_one(query)
-    if not result:
-        raise HTTPException(status_code=404, detail="Driver not found")
-    return dict(result)
 # -------------------------
 # CRUD endpoints
 # -------------------------
@@ -149,6 +160,107 @@ async def create_driver(driver: DriverCreate, user=Depends(get_optional_user)):
     })
     DRIVER_EVENTS_PROCESSED.labels(event_type="created").inc()
     return Driver(id=driver_id, status="available", **driver.dict())
+
+# -------------------------
+# Driver-specific endpoints
+# -------------------------
+@app.get("/drivers/{driver_id}/me")
+async def get_my_driver_profile(user=Depends(driver_required)):
+    driver_id = user["id"]
+    print(f"[DEBUG] Fetching profile for driver_id={driver_id}")
+
+    query = drivers.select().where(drivers.c.id == driver_id)
+    driver = await database.fetch_one(query)
+    print(f"[DEBUG] driver record: {driver}")
+
+    active_query = driver_orders.select().where(
+        (driver_orders.c.driver_id == driver_id) & (driver_orders.c.status != "delivered")
+    )
+    active_deliveries = await database.fetch_all(active_query)
+    print(f"[DEBUG] active_deliveries count: {len(active_deliveries)}")
+
+    delivered_query = driver_orders_history.select().where(
+        driver_orders_history.c.driver_id == driver_id
+    ).order_by(driver_orders_history.c.created_at.desc())
+    delivered_orders = await database.fetch_all(delivered_query)
+    print(f"[DEBUG] delivered_orders count: {len(delivered_orders)}")
+
+    return {
+        "id": driver["id"],
+        "name": driver["name"],
+        "vehicle": driver["vehicle"],
+        "license_number": driver["license_number"],
+        "status": driver["status"],
+        "active_deliveries": len(active_deliveries),
+        "delivered_orders": len(delivered_orders),
+    }
+
+
+@app.get("/drivers/{driver_id}/deliveries/history")
+async def get_driver_history(driver_id: str, user=Depends(driver_required)):
+    trace_id = user.get("trace_id", "no-trace")
+    print(f"[DEBUG][{trace_id}] Received request for delivery history of driver_id={driver_id}")
+
+    if driver_id != user["id"]:
+        print(f"[DEBUG][{trace_id}] Access denied: driver_id in token does not match requested driver_id")
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    query = driver_orders_history.select().where(
+        (driver_orders_history.c.driver_id == driver_id) & (driver_orders_history.c.status == "delivered")
+    ).order_by(driver_orders_history.c.created_at.desc())
+
+    try:
+        rows = await database.fetch_all(query)
+        print(f"[DEBUG][{trace_id}] Found {len(rows)} delivered orders for driver_id={driver_id}")
+    except Exception as e:
+        print(f"[ERROR][{trace_id}] Failed to fetch from driver_orders_history: {e}")
+        raise HTTPException(status_code=500, detail="Database query failed")
+
+    result = [dict(row) for row in rows]
+    print(f"[DEBUG][{trace_id}] Returning response: {result}")
+    return result
+
+
+# -------------------------
+# Profile + update + delete
+# -------------------------
+@app.get("/drivers/{driver_id}", response_model=Driver)
+async def get_driver_profile(driver_id: str = Path(...), user=Depends(driver_required)):
+    if driver_id != user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    query = drivers.select().where(drivers.c.id == driver_id)
+    driver = await database.fetch_one(query)
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver not found")
+
+    active_query = driver_orders.select().where(
+        (driver_orders.c.driver_id == driver_id) & (driver_orders.c.status != "delivered")
+    )
+    active_deliveries = await database.fetch_all(active_query)
+
+    delivered_query = driver_orders_history.select().where(
+        (driver_orders_history.c.driver_id == driver_id) & (driver_orders_history.c.status == "delivered")
+    )
+    delivered_orders = await database.fetch_all(delivered_query)
+
+    return {**dict(driver), "active_deliveries": len(active_deliveries), "delivered_orders": len(delivered_orders)}
+
+@app.put("/drivers/{driver_id}")
+async def update_driver_profile(
+    driver_id: str = Path(...), vehicle: str = Body(..., embed=True), user=Depends(driver_required)
+):
+    if driver_id != user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    query = drivers.update().where(drivers.c.id == driver_id).values(vehicle=vehicle)
+    await database.execute(query)
+    return {"success": True, "message": "Vehicle updated"}
+
+@app.delete("/drivers/{driver_id}")
+async def delete_driver_profile(driver_id: str = Path(...), user=Depends(driver_required)):
+    if driver_id != user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    await database.execute(drivers.delete().where(drivers.c.id == driver_id))
+    return {"success": True, "message": "Driver profile deleted"}
 
 # -------------------------
 # Health / Metrics

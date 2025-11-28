@@ -71,11 +71,11 @@ async def assign_driver_to_order(order_id: str):
       - chooses available driver
       - upserts driver_orders
       - ALWAYS writes driver_orders_history
-      - ensures driver marked busy
+      - marks driver busy
       - publishes order.updated
-      - schedules automatic driver release
+      - schedules automatic driver release which updates driver_orders to delivered
+        and inserts delivered record into driver_orders_history
     """
-
     now = datetime.utcnow()
 
     try:
@@ -97,28 +97,20 @@ async def assign_driver_to_order(order_id: str):
 
             driver_id = driver["id"]
 
-            # 2) Fetch order row safely
+            # 2) Fetch existing order
             existing = await database.fetch_one(
                 driver_orders.select().where(driver_orders.c.id == order_id)
             )
 
             # 3) Determine driver to assign
-            if existing:
-                # If already assigned, keep existing driver, don't override
-                driver_to_use = existing["driver_id"] or driver_id
-            else:
-                driver_to_use = driver_id
+            driver_to_use = existing["driver_id"] if existing and existing["driver_id"] else driver_id
 
-            # 4) UPSERT driver_orders row
+            # 4) UPSERT driver_orders
             if existing:
                 await database.execute(
                     driver_orders.update()
                     .where(driver_orders.c.id == order_id)
-                    .values(
-                        driver_id=driver_to_use,
-                        status="assigned",
-                        updated_at=now
-                    )
+                    .values(driver_id=driver_to_use, status="assigned", updated_at=now)
                 )
             else:
                 await database.execute(
@@ -142,8 +134,7 @@ async def assign_driver_to_order(order_id: str):
                 )
             )
 
-
-            # 6) Mark driver busy (only the new one)
+            # 6) Mark driver busy
             await database.execute(
                 drivers.update()
                 .where(drivers.c.id == driver_id)
@@ -163,28 +154,59 @@ async def assign_driver_to_order(order_id: str):
 
             DRIVER_EVENTS_PROCESSED.labels(event_type="assigned").inc()
 
-            logger.info(
-                f"[Driver Assignment] ✅ Order {order_id} assigned to driver {driver_to_use}"
-            )
+            logger.info(f"[Driver Assignment] ✅ Order {order_id} assigned to driver {driver_to_use}")
 
-            # 8) Schedule automatic driver release
-            async def release_driver_later(driver_id_inner: str):
+            # 8) Schedule automatic driver release (driver becomes available & order delivered)
+            async def release_driver_later(driver_id_inner: str, order_id_inner: str):
                 delay = random.randint(60, 120)
                 await asyncio.sleep(delay)
                 try:
-                    await database.execute(
-                        drivers.update()
-                        .where(drivers.c.id == driver_id_inner)
-                        .values(status="available")
-                    )
+                    async with database.transaction():
+                        # Mark driver available
+                        await database.execute(
+                            drivers.update()
+                            .where(drivers.c.id == driver_id_inner)
+                            .values(status="available")
+                        )
+                        logger.info(f"[Driver] Driver {driver_id_inner} is now available")
 
-                    logger.info(f"[Driver] Driver {driver_id_inner} is now available")
-                    await publish_event("driver.available", data={"driver_id": driver_id_inner})
+                        # Update driver_orders to delivered
+                        await database.execute(
+                            driver_orders.update()
+                            .where(driver_orders.c.id == order_id_inner)
+                            .values(status="delivered", delivered_at=datetime.utcnow())
+                        )
+
+                        # Insert delivered record into history
+                        await database.execute(
+                            driver_orders_history.insert().values(
+                                id=str(uuid.uuid4()),
+                                order_id=order_id_inner,
+                                driver_id=driver_id_inner,
+                                status="delivered",
+                                created_at=datetime.utcnow()
+                            )
+                        )
+
+                        # Publish order.delivered event
+                        await publish_event(
+                            "order.delivered",
+                            data={
+                                "order_id": order_id_inner,
+                                "driver_id": driver_id_inner,
+                                "delivered_at": str(datetime.utcnow()),
+                                "origin": "driver-service"
+                            }
+                        )
+
+                        # Emit driver available event
+                        await publish_event("driver.available", data={"driver_id": driver_id_inner})
 
                 except Exception:
                     logger.exception("[Driver] Error releasing driver")
 
-            asyncio.create_task(release_driver_later(driver_id))
+            # Schedule the release
+            asyncio.create_task(release_driver_later(driver_id, order_id))
 
             return True
 
@@ -199,6 +221,8 @@ async def assign_driver_to_order(order_id: str):
             }
         )
         return False
+
+
 
 
 # ------------------------------- EVENT HANDLERS -------------------------------
