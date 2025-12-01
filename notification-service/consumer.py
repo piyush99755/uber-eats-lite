@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from events import log_event_to_db
 from trace import get_or_create_trace_id
 from event_handlers import format_event
+from ws_manager import manager
+
 
 load_dotenv()
 
@@ -26,14 +28,26 @@ async def handle_user_created(data: dict, trace_id: str | None = None):
 async def handle_driver_created(data: dict, trace_id: str | None = None):
     print(f"[NOTIFY] {format_event('driver.created', data, trace_id)}")
 
-async def handle_order_created(data: dict, trace_id: str | None = None):
-    print(f"[NOTIFY] {format_event('order.created', data, trace_id)}")
+async def handle_order_created(data, trace_id=None):
+    await manager.broadcast({
+        "type": "order.created",
+        "data": data,
+        "trace_id": trace_id
+    })
 
-async def handle_payment_processed(data: dict, trace_id: str | None = None):
-    print(f"[NOTIFY] {format_event('payment.processed', data, trace_id)}")
+async def handle_payment_processed(data, trace_id=None):
+    await manager.broadcast({
+        "type": "payment.processed",
+        "data": data,
+        "trace_id": trace_id
+    })
 
-async def handle_driver_assigned(data: dict, trace_id: str | None = None):
-    print(f"[NOTIFY] {format_event('delivery.assigned', data, trace_id)}")
+async def handle_driver_assigned(data, trace_id=None):
+    await manager.broadcast({
+        "type": "delivery.assigned",
+        "data": data,
+        "trace_id": trace_id
+    })
 
 async def handle_unknown(event_type: str, data: dict, trace_id: str | None = None):
     print(f"[NOTIFY] {format_event(event_type, data, trace_id)}")

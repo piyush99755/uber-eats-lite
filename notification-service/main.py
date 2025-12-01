@@ -2,7 +2,7 @@ import asyncio
 import uuid
 import os
 from typing import Optional
-from fastapi import FastAPI, Query, Request, Response, Depends, HTTPException
+from fastapi import FastAPI, Query, Request, Response, Depends, HTTPException, WebSocket
 from database import database, metadata, engine
 from models import notifications, events
 from schemas import NotificationCreate, Notification
@@ -11,6 +11,7 @@ from events import publish_event
 from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
 from trace import get_or_create_trace_id
 from shared.auth import get_optional_user
+from ws_manager import manager
 
 app = FastAPI(title="Notification Service")
 
@@ -141,3 +142,14 @@ async def list_events(
     query = query.order_by(events.c.occurred_at.desc()).limit(limit)
     rows = await database.fetch_all(query)
     return [dict(r) for r in rows]
+
+
+@app.websocket("/ws/notifications")
+async def ws_notifications(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Just keep connection alive; clients usually don't send messages here
+            await websocket.receive_text()
+    except Exception:
+        manager.disconnect(websocket)

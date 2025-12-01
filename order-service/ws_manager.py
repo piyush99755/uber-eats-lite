@@ -1,7 +1,9 @@
-# ws_manager.py
-import asyncio
+# order-service/ws_manager.py
+import logging
 from typing import List
 from fastapi import WebSocket
+
+logger = logging.getLogger("ws_manager")
 
 class ConnectionManager:
     def __init__(self):
@@ -10,20 +12,26 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        logger.info(f"[WS] Client connected ({len(self.active_connections)} active)")
 
     def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
+        try:
             self.active_connections.remove(websocket)
+        except ValueError:
+            pass
+        logger.info(f"[WS] Client disconnected ({len(self.active_connections)} active)")
 
-    async def send_event(self, websocket: WebSocket, event: dict):
-        await websocket.send_json(event)
-
-    async def broadcast(self, event: dict):
-        for connection in self.active_connections[:]:
+    async def broadcast(self, message: dict):
+        """Send JSON message to all connected WS clients."""
+        dead = []
+        for ws in self.active_connections:
             try:
-                await connection.send_json(event)
+                await ws.send_json(message)
             except Exception:
-                self.disconnect(connection)
+                dead.append(ws)
 
+        # Disconnect failed sockets
+        for ws in dead:
+            self.disconnect(ws)
 
 manager = ConnectionManager()

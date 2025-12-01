@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from shared.auth import get_optional_user
 import sys
+import websockets
+from typing import Optional
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -47,6 +49,12 @@ app.add_middleware(
 # --------------------------------------------------
 JWT_SECRET = os.getenv("JWT_SECRET", "demo_secret")
 JWT_ALGORITHM = "HS256"
+
+ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order-service:8002")
+NOTIFICATION_SERVICE_URL = os.getenv("NOTIFICATION_SERVICE_URL", "http://notification-service:8003")
+DRIVER_SERVICE_URL = os.getenv("DRIVER_SERVICE_URL", "http://driver-service:8004")
+PAYMENT_SERVICE_URL = os.getenv("PAYMENT_SERVICE_URL", "http://payment-service:8008")
+
 # --------------------------------------------------
 # Demo admin user for portfolio/demo purposes
 # --------------------------------------------------
@@ -596,63 +604,264 @@ async def proxy(request: Request, service: str, path: str = ""):
             headers=cors_headers,
         )
 
-@app.websocket("/ws/orders")
-async def orders_ws(websocket: WebSocket):
-    token = websocket.query_params.get("token")
-    
-    # --- Validate token ---
-    if not token:
-        await websocket.close(code=4001)
-        return
+# ---------- WebSocket relay helpers & endpoints (replace existing relays) ----------
 
-    user_claims = decode_jwt(token)
-    if not user_claims:
-        await websocket.close(code=4002)
-        return
+
+ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order-service:8002")
+NOTIFICATION_SERVICE_URL = os.getenv("NOTIFICATION_SERVICE_URL", "http://notification-service:8003")
+DRIVER_SERVICE_URL = os.getenv("DRIVER_SERVICE_URL", "http://driver-service:8004")
+
+def http_to_ws(url: str) -> str:
+    """
+    Convert http(s) -> ws(s). If url already ws:// or wss://, return as-is.
+    """
+    if url.startswith("wss://") or url.startswith("ws://"):
+        return url
+    if url.startswith("https://"):
+        return "wss://" + url[len("https://"):]
+    if url.startswith("http://"):
+        return "ws://" + url[len("http://"):]
+    return url
+
+async def _relay_bidirectional(client_ws: WebSocket, backend_ws, client_to_backend_name="c->b", backend_to_client_name="b->c"):
+    """
+    Relay loop: read backend -> send client, and client -> backend concurrently.
+    Expects backend_ws to be an object supporting `send` and `__aiter__` (websockets library).
+    """
+    async def _backend_to_client():
+        try:
+            async for msg in backend_ws:
+                # backend msg may be bytes or text
+                if isinstance(msg, (bytes, bytearray)):
+                    await client_ws.send_bytes(msg)
+                else:
+                    await client_ws.send_text(msg)
+                logger.debug(f"[WS RELAY] {backend_to_client_name} forwarded message")
+        except Exception as e:
+            logger.debug(f"[WS RELAY] {backend_to_client_name} terminated: {e}")
+            raise
+
+    async def _client_to_backend():
+        try:
+            while True:
+                # FastAPI WebSocket receive returns text/bytes depending on message type
+                data = await client_ws.receive()
+                # data is a dict like {"type":"websocket.receive", "text": "..."} or "bytes"
+                if "text" in data and data["text"] is not None:
+                    await backend_ws.send(data["text"])
+                elif "bytes" in data and data["bytes"] is not None:
+                    await backend_ws.send(data["bytes"])
+                elif data.get("type") == "websocket.disconnect":
+                    # client closed connection
+                    raise asyncio.CancelledError("client disconnected")
+                logger.debug(f"[WS RELAY] {client_to_backend_name} forwarded message")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"[WS RELAY] {client_to_backend_name} terminated: {e}")
+            raise
+
+    tasks = [
+        asyncio.create_task(_backend_to_client(), name="backend_to_client"),
+        asyncio.create_task(_client_to_backend(), name="client_to_backend"),
+    ]
+
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+    for t in pending:
+        t.cancel()
+    # re-raise any exception from done tasks so outer handler can log/handle
+    for t in done:
+        if t.exception():
+            raise t.exception()
+
+async def _relay_loop(
+    websocket: WebSocket,
+    backend_url: str,
+    extra_headers: Optional[list] = None
+):
+    """
+    WebSocket relay loop compatible with very old websockets versions (3.x–4.x).
+    Does NOT pass any extra_headers under any circumstances.
+    """
 
     await websocket.accept()
+    logger.info(f"[WS-GATEWAY] Client accepted, relaying to backend: {backend_url}")
 
-    # SSE source endpoint
-    sse_url = f"{SERVICES['orders']}/orders/orders/events/stream?token={token}"
+    backoff = 1.0
+    backoff_max = 8.0
 
-    headers = {
-        "Accept": "text/event-stream",
-        "x-trace-id": str(uuid.uuid4())
-    }
+    while True:
+        try:
+            logger.info(f"[WS-GATEWAY] Connecting to backend: {backend_url}")
 
+            # ✔ websockets < 5.0 only accepts ONE argument → the URI
+            async with websockets.connect(backend_url) as backend_ws:
+                logger.info(f"[WS-GATEWAY] Connected to backend: {backend_url}")
+
+                backoff = 1.0
+
+                # relay until client or backend closes
+                await _relay_bidirectional(websocket, backend_ws)
+
+                logger.info("[WS-GATEWAY] Relay ended normally")
+                break
+
+        except websockets.InvalidURI as e:
+            logger.error(f"[WS-GATEWAY] Invalid backend URI: {e}")
+            await websocket.close(code=1011)
+            break
+
+        except asyncio.CancelledError:
+            logger.info("[WS-GATEWAY] Relay cancelled")
+            break
+
+        except Exception as e:
+            logger.error(
+                f"[WS-GATEWAY] Backend WS error, reconnecting in {backoff:.1f}s → {e}"
+            )
+
+            try:
+                await asyncio.sleep(backoff)
+            except asyncio.CancelledError:
+                break
+
+            backoff = min(backoff * 2, backoff_max)
+            continue
+
+    # close client socket if open
     try:
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("GET", sse_url, headers=headers) as sse_response:
+        await websocket.close()
+    except Exception:
+        pass
 
-                buffer = ""
+    logger.info("[WS-GATEWAY] Client connection closed")
 
-                async for chunk in sse_response.aiter_text():
-                    buffer += chunk
 
-                    # Process each SSE event in the buffer
-                    while "\n\n" in buffer:
-                        raw_event, buffer = buffer.split("\n\n", 1)
+# ---------- endpoints using helper ----------
+@app.websocket("/ws/orders")
+async def orders_relay(websocket: WebSocket):
+    await websocket.accept()
 
-                        for line in raw_event.splitlines():
-                            if not line.startswith("data:"):
-                                continue
+    token = websocket.query_params.get("token")
 
-                            data_str = line[len("data:"):].strip()
+    # -------------------- BACKEND URLS --------------------
+    backend_targets = [
+        ("order",   http_to_ws(f"{ORDER_SERVICE_URL}/ws/orders")),
+        ("driver",  http_to_ws(f"{DRIVER_SERVICE_URL}/ws/drivers")),
+        ("payment", http_to_ws(f"{PAYMENT_SERVICE_URL}/ws/payments")),
+    ]
 
-                            try:
-                                event_json = json.loads(data_str)
-                                await websocket.send_json(event_json)
+    # -------------------- CONNECT WITH RETRY --------------------
+    async def connect_with_retry(name, url, max_tries=60, delay=0.5):
+        for attempt in range(1, max_tries + 1):
+            try:
+                ws = await websockets.connect(url)
+                logger.info(f"[WS-MULTI] Connected to {name} backend: {url}")
+                return ws
+            except Exception as e:
+                logger.warning(
+                    f"[WS-MULTI] {name} not ready ({url}). Retry {attempt}/{max_tries}. Error: {e}"
+                )
+                await asyncio.sleep(delay)
+        logger.error(f"[WS-MULTI] FAILED TO CONNECT to {name}: {url}")
+        return None
 
-                            except Exception as ws_err:
-                                logger.error(f"Failed to send event to WS: {ws_err}")
-                                await websocket.close(code=4003)
-                                return
+    # connect to all services
+    connections = []
+    for name, url in backend_targets:
+        ws = await connect_with_retry(name, url)
+        if ws:
+            connections.append((name, ws))
+
+    # -------------------- BACKEND → CLIENT PUMP --------------------
+    async def pump_backend(name: str, conn):
+        """
+        Reads messages from each backend WS and forwards them to the browser.
+        Ensures the message is parsed and flattened so frontend receives:
+
+        {
+          "source": "payment",
+          "type": "payment.completed",
+          "order_id": 123
+        }
+        """
+        try:
+            async for msg in conn:
+                try:
+                    parsed = json.loads(msg)
+                except Exception:
+                    parsed = {"type": "unknown", "payload": msg}
+
+                parsed["source"] = name
+                await websocket.send_text(json.dumps(parsed))
+
+        except Exception as e:
+            logger.error(f"[WS-MULTI] Backend pump {name} ended: {e}")
+
+    pump_tasks = [
+        asyncio.create_task(pump_backend(name, conn))
+        for name, conn in connections
+    ]
+
+    # -------------------- CLIENT → BACKEND (broadcast) --------------------
+    try:
+        while True:
+            data = await websocket.receive()
+
+            if data["type"] == "websocket.disconnect":
+                break
+
+            if "text" in data and data["text"] is not None:
+                payload = data["text"]
+            elif "bytes" in data and data["bytes"] is not None:
+                payload = data["bytes"]
+            else:
+                continue
+
+            for _, conn in connections:
+                try:
+                    await conn.send(payload)
+                except Exception:
+                    pass
 
     except Exception as e:
-        logger.error(f"SSE proxy error: {e}")
+        logger.error(f"[WS-MULTI] Client → backend loop ended: {e}")
 
     finally:
-        try:
-            await websocket.close()
-        except:
-            pass
+        # Cleanup backend sockets
+        for _, conn in connections:
+            try:
+                await conn.close()
+            except:
+                pass
+
+        # Cancel pump tasks
+        for t in pump_tasks:
+            t.cancel()
+
+
+@app.websocket("/ws/notifications")
+async def notifications_relay(websocket: WebSocket):
+    backend_http = f"{NOTIFICATION_SERVICE_URL.rstrip('/')}/ws/notifications"
+    backend_ws = http_to_ws(backend_http)
+    token = websocket.query_params.get("token")
+    extra_headers = []
+    if token:
+        extra_headers.append(("Authorization", f"Bearer {token}"))
+    trace = websocket.query_params.get("trace_id")
+    if trace:
+        extra_headers.append(("x-trace-id", trace))
+    await _relay_loop(websocket, backend_ws, extra_headers=extra_headers)
+
+@app.websocket("/ws/drivers")
+async def drivers_relay(websocket: WebSocket):
+    backend_http = f"{DRIVER_SERVICE_URL.rstrip('/')}/ws/drivers"
+    backend_ws = http_to_ws(backend_http)
+    token = websocket.query_params.get("token")
+    extra_headers = []
+    if token:
+        extra_headers.append(("Authorization", f"Bearer {token}"))
+    trace = websocket.query_params.get("trace_id")
+    if trace:
+        extra_headers.append(("x-trace-id", trace))
+    await _relay_loop(websocket, backend_ws, extra_headers=extra_headers)

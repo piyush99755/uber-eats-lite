@@ -2,22 +2,20 @@ import os
 import asyncio
 import logging
 from uuid import uuid4
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, WebSocket
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import stripe
 import jwt
-
 from database import database, metadata, engine, init_db
 from models import payments
-from events import publish_event
+from events import publish_event, connected_clients, broadcast_payment_event
 from consumer import poll_orders
 
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 # Load environment
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 load_dotenv()
-
 JWT_SECRET = os.getenv("JWT_SECRET", "changeme")
 
 app = FastAPI(title="Payment Service", version="2.0.0")
@@ -37,9 +35,9 @@ if not STRIPE_SECRET_KEY:
 stripe.api_key = STRIPE_SECRET_KEY
 logger.info("💳 Stripe mode enabled")
 
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 # Models
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 class PaymentRequest(BaseModel):
     order_id: str
     amount: float
@@ -48,9 +46,9 @@ class ConfirmPaymentRequest(BaseModel):
     payment_intent_id: str
     order_id: str
 
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 # Auth
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 def get_current_user(authorization: str = Header(...)):
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -66,9 +64,9 @@ def get_current_user(authorization: str = Header(...)):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 # Health Monitoring
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 last_poll_success = False
 
 async def monitored_poll_orders():
@@ -86,9 +84,9 @@ async def monitored_poll_orders():
             last_poll_success = False
             await asyncio.sleep(5)
 
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 # Routes
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 @app.get("/")
 async def root():
     return {"service": "payment-service", "status": "running"}
@@ -102,15 +100,12 @@ async def health():
         "stripe_enabled": True,
     }
 
-# ───────────────────────────────────────────────────────────────
-# Create Stripe PaymentIntent
-# ───────────────────────────────────────────────────────────────
 @app.post("/create-intent")
 async def create_payment_intent(request: PaymentRequest, user=Depends(get_current_user)):
     trace_id = user["trace_id"]
     try:
         intent = stripe.PaymentIntent.create(
-            amount=int(request.amount * 100),  # cents
+            amount=int(request.amount * 100),
             currency="usd",
             payment_method_types=["card"],
             metadata={"order_id": request.order_id, "user_id": user["id"]}
@@ -121,34 +116,18 @@ async def create_payment_intent(request: PaymentRequest, user=Depends(get_curren
         logger.error(f"[STRIPE ERROR] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ───────────────────────────────────────────────────────────────
-# Confirm Payment after Stripe success
-# ───────────────────────────────────────────────────────────────
 @app.post("/confirm-payment")
 async def confirm_payment(req: ConfirmPaymentRequest, user=Depends(get_current_user)):
     trace_id = user["trace_id"]
-
-    # Retrieve PaymentIntent from Stripe
     intent = stripe.PaymentIntent.retrieve(req.payment_intent_id)
     if intent.status != "succeeded":
         raise HTTPException(status_code=400, detail="Payment not successful")
-
     amount = intent.amount / 100
 
-    # Check if payment for this order already exists
-    existing = await database.fetch_one(
-        payments.select().where(payments.c.order_id == req.order_id)
-    )
-
+    existing = await database.fetch_one(payments.select().where(payments.c.order_id == req.order_id))
     if existing:
         payment_id = existing["id"]
         logger.warning(f"[TRACE {trace_id}] Payment already exists for order {req.order_id}, skipping insert")
-        # Optionally, update status if needed:
-        # await database.execute(
-        #     payments.update()
-        #         .where(payments.c.order_id == req.order_id)
-        #         .values(status="paid")
-        # )
     else:
         payment_id = str(uuid4())
         await database.execute(
@@ -162,7 +141,6 @@ async def confirm_payment(req: ConfirmPaymentRequest, user=Depends(get_current_u
         )
         logger.info(f"[TRACE {trace_id}] Payment saved to DB for order {req.order_id}")
 
-    # Broadcast event to order-service and driver-service
     await publish_event("payment.completed", {
         "payment_id": payment_id,
         "order_id": req.order_id,
@@ -174,20 +152,29 @@ async def confirm_payment(req: ConfirmPaymentRequest, user=Depends(get_current_u
     logger.info(f"[TRACE {trace_id}] Payment confirmed for order {req.order_id}")
     return {"message": "Payment confirmed and order marked as paid"}
 
-
-# ───────────────────────────────────────────────────────────────
-# List Payments
-# ───────────────────────────────────────────────────────────────
 @app.get("/payments")
 async def list_payments(user=Depends(get_current_user)):
-    rows = await database.fetch_all(
-        payments.select().where(payments.c.user_id == user["id"])
-    )
+    rows = await database.fetch_all(payments.select().where(payments.c.user_id == user["id"]))
     return [dict(r) for r in rows]
 
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
+# WebSocket
+# ───────────────────────────────────────────────────────────
+@app.websocket("/ws/payments")
+async def payments_ws(websocket: WebSocket):
+    await websocket.accept()
+    connected_clients.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # no incoming messages expected
+    except:
+        pass
+    finally:
+        connected_clients.discard(websocket)
+
+# ───────────────────────────────────────────────────────────
 # Startup / Shutdown
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
     logger.info("[STARTUP] Connecting DB...")
@@ -200,9 +187,9 @@ async def startup_event():
 async def shutdown_event():
     await database.disconnect()
 
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 # Entrypoint
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8008, reload=True)

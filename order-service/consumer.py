@@ -146,6 +146,63 @@ async def handle_driver_failed(payload: dict):
     await manager.broadcast({"event": "driver.failed", "order_id": order_id, "reason": reason})
     await publish_event("driver.failed", {"event_id": str(payload.get("event_id") or order_id), "order_id": order_id, "reason": reason})
 
+# -------------------------------
+# Driver Event Handler (Refactored)
+# -------------------------------
+async def handle_driver_event(payload: dict, event_id=None):
+    """
+    Handles any driver-related event (assigned, pending, failed).
+    Updates the DB and broadcasts via WebSocket.
+    """
+    order_id = payload.get("order_id") or event_id
+    if not order_id:
+        logger.warning("[DriverEvent] ⚠ Missing order_id in payload")
+        return
+
+    # Fetch current order
+    order_row = await database.fetch_one(orders.select().where(orders.c.id == order_id))
+    if not order_row:
+        logger.warning(f"[DriverEvent] ⚠ Order {order_id} not found")
+        return
+
+    order = dict(order_row)
+    event_type = payload.get("type", "driver.assigned").lower()
+
+    update_values = {}
+    ws_payload = {"order_id": order_id}
+
+    # Handle specific driver event types
+    if event_type == "driver.assigned":
+        driver_id = payload.get("driver_id")
+        driver_name = payload.get("driver_name")
+        if not driver_id:
+            logger.warning(f"[DriverAssigned] ⚠ Missing driver_id for order {order_id}")
+            return
+        update_values = {"driver_id": driver_id, "driver_name": driver_name, "status": "assigned"}
+        ws_payload.update({"status": "assigned", "driver_id": driver_id, "driver_name": driver_name})
+
+    elif event_type == "driver.pending":
+        reason = payload.get("reason", "no drivers available")
+        ws_payload.update({"reason": reason, "status": "pending"})
+        logger.info(f"[DriverPending] ⚠ Order {order_id} pending: {reason}")
+
+    elif event_type == "driver.failed":
+        reason = payload.get("reason", "driver assignment failed")
+        update_values = {"status": "failed"}
+        ws_payload.update({"status": "failed", "reason": reason})
+        logger.info(f"[DriverFailed] ❌ Order {order_id} failed: {reason}")
+
+    # Update DB if needed
+    if update_values:
+        await database.execute(orders.update().where(orders.c.id == order_id).values(**update_values))
+        logger.info(f"[DriverEvent] ✅ Order {order_id} updated in DB with {update_values}")
+
+    # Broadcast WS
+    await manager.broadcast({"event": "order.updated" if event_type != "driver.pending" else "driver.pending", **ws_payload})
+
+    # Publish event to other services
+    ev_id = str(event_id or payload.get("event_id") or order_id)
+    await publish_event(event_type, {"event_id": ev_id, **ws_payload})
 
 # -------------------------------
 # Generic SQS Poller

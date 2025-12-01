@@ -1,4 +1,4 @@
-# main.py — rewritten with publish_order_created_event
+# main.py 
 import uuid
 import asyncio
 import json
@@ -7,7 +7,7 @@ import logging
 import jwt
 from typing import List, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect, Query, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -260,15 +260,14 @@ async def get_events(limit: int = 50, user=Depends(get_current_user)):
 # WebSocket endpoint
 # ----------------------------------------------------------------------
 @app.websocket("/ws/orders")
-async def websocket_orders(websocket: WebSocket):
-    await manager.connect(websocket)
+async def ws_orders(ws: WebSocket):
+    await ws.accept()
     try:
         while True:
-            await asyncio.sleep(10)
+            data = await ws.receive_text()  # keep the loop active
+            # optionally handle messages from client
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-    except Exception:
-        manager.disconnect(websocket)
+        print("WS connection closed")
 
 # ----------------------------------------------------------------------
 # SSE endpoint
@@ -351,3 +350,5 @@ async def deliver_order(order_id: str, user=Depends(get_optional_user)):
 
     await publish_event("order.delivered", event_payload, trace_id=user.get("trace_id"))
     return {"status": "delivered", "order_id": order_id}
+
+

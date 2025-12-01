@@ -1,14 +1,14 @@
 import asyncio
 import uuid
 import os
-from fastapi import FastAPI, HTTPException, Request, Depends, Response, Path, Body
+from fastapi import FastAPI, HTTPException, Request, Depends, Response, Path, Body, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import insert
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from jose import jwt, JWTError
-
+from ws_manager import connect_client, disconnect_client
 from database import database, metadata, engine
 from models import drivers, driver_orders, driver_orders_history
 from schemas import DriverCreate, Driver
@@ -262,6 +262,18 @@ async def delete_driver_profile(driver_id: str = Path(...), user=Depends(driver_
     await database.execute(drivers.delete().where(drivers.c.id == driver_id))
     return {"success": True, "message": "Driver profile deleted"}
 
+@app.websocket("/ws/drivers")
+async def driver_ws(websocket: WebSocket):
+    await connect_client(websocket)
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            # Heartbeat / echo
+            await websocket.send_text("pong")
+    except Exception:
+        pass
+    finally:
+        await disconnect_client(websocket)
 # -------------------------
 # Health / Metrics
 # -------------------------

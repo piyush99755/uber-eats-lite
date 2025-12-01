@@ -32,7 +32,7 @@ EVENT_TARGETS = {
     "order.created": ["Notification Service", "Driver Service", "Payment Service"],
     "order.updated": ["Driver Service", "Notification Service"],  # send to driver for assignment
     "order.deleted": ["Notification Service", "Driver Service"],
-    "payment.completed": ["Order Service"],  # only order-service
+    "payment.completed": ["Order Service", "Driver Service"],  # only order-service
 }
 
 SERVICE_QUEUE_MAP = {
@@ -46,56 +46,116 @@ SERVICE_QUEUE_MAP = {
 import uuid
 from datetime import datetime
 
-async def publish_order_created_event(order: dict, trace_id: str = None):
-    """
-    Publish an 'order.created' event to all relevant services:
-    Notification, Driver, Payment.
-    Ensures order_id and other essential fields are always included.
-    """
-    order_id = order.get("id")
-    if not order_id:
-        logger.error("[publish_order_created_event] ❌ Missing order id in order object")
-        return
-
-    # Build payload with essential order info
-    event_data = {
-        "order_id": order_id,
-        "user_id": order.get("user_id"),
-        "status": order.get("status", "pending"),
-        "payment_status": order.get("payment_status", "unpaid"),
-        "driver_id": order.get("driver_id"),
-        "items": order.get("items", []),
-        "total_amount": order.get("total_amount"),
-        "event_id": f"order.created_{uuid.uuid4()}"  # ✅ guaranteed unique
-    }
-
-    # Build event payload wrapper
+async def publish_event(event_type: str, data: dict, trace_id: str = None):
     event_payload = {
-        "event_type": "order.created",
-        "payload": event_data,
+        "type": event_type,
+        "event_id": str(data.get("event_id") or uuid.uuid4()),
+        "data": data,
         "trace_id": trace_id,
         "timestamp": datetime.utcnow().isoformat(),
-        "id": event_data["event_id"]
     }
 
-    # Broadcast to WebSocket and SSE clients
+    # SSE
     for queue in clients:
         try:
             await queue.put(event_payload)
         except Exception as e:
             logger.warning(f"[SSE ERROR] {e}")
 
-    await manager.broadcast(event_payload)
+    # WS
+    try:
+        await manager.broadcast(event_payload)
+    except Exception as e:
+        logger.warning(f"[WebSocket ERROR] {e}")
 
-    if not USE_AWS:
-        logger.info(f"[LOCAL EVENT] {event_payload}")
+    # SQS
+    if USE_AWS:
+        try:
+            async with session.client("sqs", region_name=AWS_REGION) as sqs:
+                targets = EVENT_TARGETS.get(event_type, [])
+                for service_name in targets:
+                    queue_url = SERVICE_QUEUE_MAP.get(service_name)
+                    if not queue_url:
+                        logger.warning(f"[WARN] Missing queue for {service_name}")
+                        continue
+                    try:
+                        await sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event_payload))
+                        logger.info(f"[SQS → {service_name}] {event_type} event_id={event_payload['event_id']}")
+                    except Exception as e:
+                        logger.warning(f"[SQS ERROR → {service_name}] {e}")
+        except Exception as e:
+            logger.error(f"[EVENT ERROR] {e}")
+
+
+async def publish_order_created_event(order: dict, trace_id: str = None):
+    """
+    Publish an 'order.created' event to:
+    - SSE clients
+    - WebSocket clients
+    - SQS queues (Driver, Notification, Payment)
+
+    FORMAT (required by driver-service):
+    {
+        "type": "order.created",
+        "event_id": "uuid",
+        "data": { ... }
+    }
+    """
+
+    order_id = order.get("id")
+    if not order_id:
+        logger.error("[publish_order_created_event] ❌ Missing order id in order object")
         return
 
-    # Send to SQS queues
+    # ---- BUILD THE DATA PAYLOAD ----
+    data = {
+        "order_id": order_id,
+        "user_id": order.get("user_id"),
+        "user_name": order.get("user_name"),      # if provided
+        "status": order.get("status", "pending"),
+        "payment_status": order.get("payment_status", "unpaid"),
+        "driver_id": order.get("driver_id"),
+        "driver_name": order.get("driver_name"),  # NEW — supports frontend
+        "items": order.get("items", []),
+        "total_amount": order.get("total_amount"),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    # ---- WRAP IN THE STANDARD EVENT ENVELOPE ----
+    event_payload = {
+        "type": "order.created",                   # REQUIRED by driver-service
+        "event_id": str(uuid.uuid4()),             # Universal event ID
+        "data": data,
+        "trace_id": trace_id,
+        "timestamp": data["timestamp"],
+    }
+
+    # ---- BROADCAST TO SSE CLIENTS ----
+    for queue in clients:
+        try:
+            await queue.put(event_payload)
+        except Exception as e:
+            logger.warning(f"[SSE ERROR] {e}")
+
+    # ---- BROADCAST TO WEBSOCKET CLIENTS ----
+    try:
+        await manager.broadcast(event_payload)
+    except Exception as e:
+        logger.warning(f"[WebSocket ERROR] {e}")
+
+    # ---- LOCAL DEV MODE ----
+    if not USE_AWS:
+        logger.info(f"[LOCAL EVENT EMIT] {event_payload}")
+        return
+
+    # ---- SEND TO SQS TARGET SERVICES ----
     try:
         async with session.client("sqs", region_name=AWS_REGION) as sqs:
-            for service_name in EVENT_TARGETS.get("order.created", []):
+            targets = EVENT_TARGETS.get("order.created", [])
+
+            for service_name in targets:
                 queue_url = SERVICE_QUEUE_MAP.get(service_name)
+
                 if not queue_url:
                     logger.warning(f"[WARN] Missing queue for {service_name}")
                     continue
@@ -105,7 +165,9 @@ async def publish_order_created_event(order: dict, trace_id: str = None):
                         QueueUrl=queue_url,
                         MessageBody=json.dumps(event_payload)
                     )
-                    logger.info(f"[SQS → {service_name}] order.created (event_id={event_payload['id']})")
+                    logger.info(
+                        f"[SQS → {service_name}] order.created event_id={event_payload['event_id']}"
+                    )
                 except Exception as e:
                     logger.warning(f"[SQS ERROR → {service_name}] {e}")
 
