@@ -7,12 +7,16 @@ orders = Table(
     metadata,
     Column("id", String, primary_key=True),
     Column("user_id", String, nullable=False),
-    Column("items", JSON, nullable=False),  
+    Column("user_name", String, nullable=True),       
+    Column("items", JSON, nullable=False),
     Column("total", Float, nullable=False),
     Column("status", String, default="pending"),
     Column("payment_status", String, default="pending"),
     Column("driver_id", String, nullable=True),
+    Column("driver_name", String, nullable=True),      
+    Column("delivered_at", DateTime, nullable=True),   
 )
+
 
 event_logs = Table(
     "event_logs",

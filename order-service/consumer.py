@@ -1,10 +1,12 @@
-# consumer.py (order-service) — rewritten
+# consumer.py (order-service)
 import asyncio
 import json
 import os
 from dotenv import load_dotenv
 import aioboto3
 import logging
+from datetime import datetime
+from events import publish_event
 
 from database import database
 from models import orders
@@ -110,41 +112,135 @@ async def handle_payment_completed(payload: dict, event_id=None):
 # -------------------------------
 # Driver Events Handlers
 # -------------------------------
-async def handle_driver_assigned(payload: dict):
+async def handle_driver_assigned(payload: dict, event_id=None):
     order_id = payload.get("order_id")
     driver_id = payload.get("driver_id")
     if not order_id or not driver_id:
         logger.warning("[DriverAssigned] ⚠ Missing fields")
         return
 
+    # Accept driver_name and user_name if provided by driver-service payload
+    driver_name = payload.get("driver_name")
+    user_name = payload.get("user_name")
+    items = payload.get("items")
+    total = payload.get("total")
+
+    update_vals = {"driver_id": driver_id, "status": "assigned"}
+    if driver_name is not None:
+        update_vals["driver_name"] = driver_name
+    if user_name is not None:
+        update_vals["user_name"] = user_name
+    if items is not None:
+        # ensure DB stores JSON for items (orders table stores JSON already)
+        try:
+            # if items is list -> store as-is (we store JSON), else if str -> keep str
+            update_vals["items"] = json.dumps(items) if not isinstance(items, str) else items
+        except:
+            pass
+    if total is not None:
+        update_vals["total"] = float(total)
+
     await database.execute(
         orders.update()
         .where(orders.c.id == order_id)
-        .values(driver_id=driver_id, status="assigned")
+        .values(**update_vals)
     )
     logger.info(f"[DriverAssigned] 🚗 Driver {driver_id} → Order {order_id}")
 
-    await manager.broadcast({"event": "order.updated", "order_id": order_id, "status": "assigned", "driver_id": driver_id})
-    await publish_event("order.updated", {"event_id": str(payload.get("event_id") or order_id), "order_id": order_id, "status": "assigned", "driver_id": driver_id})
+    # Build payload with full fields so frontend gets correct values
+    ws_payload = {
+        "event": "order.updated",
+        "order_id": order_id,
+        "status": "assigned",
+        "driver_id": driver_id,
+        "driver_name": driver_name,
+        "user_name": user_name,
+        "items": payload.get("items") if payload.get("items") is not None else None,
+        "total": payload.get("total") if payload.get("total") is not None else None,
+    }
+
+    # Broadcast and publish
+    await manager.broadcast(ws_payload)
+    await publish_event("order.updated", {"event_id": str(event_id or payload.get("event_id") or order_id), **ws_payload})
 
 
-async def handle_driver_pending(payload: dict):
-    order_id = payload.get("order_id")
-    reason = payload.get("reason", "no drivers available")
-    logger.info(f"[DriverPending] ⚠ Order {order_id} pending: {reason}")
+async def handle_order_delivered(payload: dict, event_id=None):
+    order_id = payload.get("order_id") or event_id
+    if not order_id:
+        logger.warning("[OrderDelivered] ⚠ Missing order_id")
+        return
 
-    await manager.broadcast({"event": "driver.pending", "order_id": order_id, "reason": reason})
-    await publish_event("driver.pending", {"event_id": str(payload.get("event_id") or order_id), "order_id": order_id, "reason": reason})
+    # read delivered_at from payload if provided, else now
+    delivered_at = payload.get("delivered_at")
+    try:
+        if not delivered_at:
+            delivered_at = datetime.utcnow()
+        else:
+            # payload might be iso string; try to preserve as-is for DB insert
+            delivered_at = delivered_at if isinstance(delivered_at, datetime) else datetime.fromisoformat(str(delivered_at))
+    except Exception:
+        delivered_at = datetime.utcnow()
+
+    # If payload gives driver_name/user_name/items/total include those too
+    driver_id = payload.get("driver_id")
+    driver_name = payload.get("driver_name")
+    user_name = payload.get("user_name")
+    items = payload.get("items")
+    total = payload.get("total")
+
+    update_vals = {"status": "delivered", "delivered_at": delivered_at}
+    if driver_id:
+        update_vals["driver_id"] = driver_id
+    if driver_name is not None:
+        update_vals["driver_name"] = driver_name
+    if user_name is not None:
+        update_vals["user_name"] = user_name
+    if items is not None:
+        # ensure we store items as JSON text in DB
+        try:
+            update_vals["items"] = json.dumps(items) if not isinstance(items, str) else items
+        except:
+            pass
+    if total is not None:
+        try:
+            update_vals["total"] = float(total)
+        except:
+            pass
+
+    await database.execute(
+        orders.update()
+        .where(orders.c.id == order_id)
+        .values(**update_vals)
+    )
+
+    logger.info(f"[OrderDelivered] 🎉 Order {order_id} marked DELIVERED")
+
+    # Broadcast WS message for frontend (full payload)
+    ws_payload = {
+        "event": "order.updated",
+        "order_id": order_id,
+        "status": "delivered",
+        "driver_id": driver_id,
+        "driver_name": driver_name,
+        "user_name": user_name,
+        "items": items,
+        "total": total,
+        "delivered_at": delivered_at.isoformat() if isinstance(delivered_at, datetime) else str(delivered_at),
+    }
+
+    await manager.broadcast(ws_payload)
+
+    # Re-publish internal order.updated event
+    await publish_event("order.updated", {"event_id": str(event_id or payload.get("event_id") or order_id), **ws_payload})
+
+async def handle_driver_failed(payload, event_id=None):
+    payload["type"] = "driver.failed"
+    await handle_driver_event(payload, event_id)
 
 
-async def handle_driver_failed(payload: dict):
-    order_id = payload.get("order_id")
-    reason = payload.get("reason", "driver assignment failed")
-    await database.execute(orders.update().where(orders.c.id == order_id).values(status="failed"))
-    logger.info(f"[DriverFailed] ❌ Order {order_id} failed: {reason}")
-
-    await manager.broadcast({"event": "driver.failed", "order_id": order_id, "reason": reason})
-    await publish_event("driver.failed", {"event_id": str(payload.get("event_id") or order_id), "order_id": order_id, "reason": reason})
+async def handle_driver_pending(payload, event_id=None):
+    payload["type"] = "driver.pending"
+    await handle_driver_event(payload, event_id)
 
 # -------------------------------
 # Driver Event Handler (Refactored)
@@ -192,6 +288,7 @@ async def handle_driver_event(payload: dict, event_id=None):
         ws_payload.update({"status": "failed", "reason": reason})
         logger.info(f"[DriverFailed] ❌ Order {order_id} failed: {reason}")
 
+    
     # Update DB if needed
     if update_values:
         await database.execute(orders.update().where(orders.c.id == order_id).values(**update_values))
@@ -275,7 +372,8 @@ if __name__ == "__main__":
             poll_queue(DRIVER_QUEUE_URL, {
                 "driver.assigned": handle_driver_assigned,
                 "driver.pending": handle_driver_pending,
-                "driver.failed": handle_driver_failed
+                "driver.failed": handle_driver_failed,
+                "order.delivered": handle_order_delivered
             }, "driver.queue")
         )
     asyncio.run(main())

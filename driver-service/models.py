@@ -1,10 +1,8 @@
 # models.py
 import uuid
-from sqlalchemy import Table, Column, String, DateTime, Float, Text, MetaData, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Table, Column, String, DateTime, Float, Text, MetaData, JSON
 from datetime import datetime
 
-# Define metadata here
 metadata = MetaData()
 
 drivers = Table(
@@ -41,19 +39,33 @@ driver_orders = Table(
     "driver_orders",
     metadata,
     Column("id", String, primary_key=True),
-    Column("driver_id", String, nullable=True),
-    Column("status", String, nullable=False),
-    Column("created_at", DateTime, default=datetime.utcnow),
-    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow),
+    Column("order_id", String, nullable=False),
+    Column("driver_id", String, nullable=False),
+    Column("driver_name", String, nullable=True),
+    Column("user_id", String, nullable=True),
+    Column("user_name", String, nullable=True),
+    Column("items", JSON, nullable=True),
+    Column("total", Float, nullable=True),
+    Column("status", String, default="assigned"),
+    Column("assigned_at", DateTime, default=datetime.utcnow),
     Column("delivered_at", DateTime, nullable=True),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow)
 )
 
 driver_orders_history = Table(
     "driver_orders_history",
     metadata,
-    Column("id", UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
+    Column("id", String, primary_key=True),
     Column("order_id", String, nullable=False),
-    Column("driver_id", UUID(as_uuid=True), ForeignKey("drivers.id"), nullable=False),
+    Column("driver_id", String, nullable=False),
+    Column("driver_name", String, nullable=True),
+    Column("user_id", String, nullable=True),
+    Column("user_name", String, nullable=True),
+    Column("items", JSON, nullable=True),
+    Column("total", Float, nullable=True),
     Column("status", String, nullable=False),
-    Column("created_at", DateTime, nullable=False),
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow)
 )
+

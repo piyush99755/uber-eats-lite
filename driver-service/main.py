@@ -15,6 +15,11 @@ from schemas import DriverCreate, Driver
 from events import publish_event
 from consumer import start_driver_consumer
 from metrics import DRIVER_EVENTS_PROCESSED, ACTIVE_DRIVERS
+import logging
+
+logger = logging.getLogger("driver-service")
+logger.setLevel(logging.INFO)
+
 
 # -------------------------
 # FastAPI app
@@ -26,6 +31,10 @@ ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order-service:8002")
 JWT_SECRET = os.getenv("JWT_SECRET", "demo_secret")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
+DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
+if not DRIVER_QUEUE_URL:
+    raise RuntimeError("❌ DRIVER_QUEUE_URL is missing in environment variables!")
+
 # CORS (allow your API Gateway)
 origins = ["http://localhost:5173"]
 
@@ -36,15 +45,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+async def safe_start_driver_consumer():
+    while True:
+        try:
+            logger.info("📥 Starting SQS consumer loop...")
+            await start_driver_consumer()
+        except Exception as e:
+            logger.error(f"🔥 SQS consumer crashed: {e}")
+            await asyncio.sleep(5)
 
 # -------------------------
 # Startup / Shutdown
 # -------------------------
 @app.on_event("startup")
 async def startup():
-    metadata.create_all(engine)
+    # Connect DB
     await database.connect()
-    asyncio.create_task(start_driver_consumer())
+    logger.info("📦 Driver Service DB connected.")
+
+    # Start SQS Consumer
+    logger.info(f"🚀 Starting SQS consumer for Driver Service… Queue = {DRIVER_QUEUE_URL}")
+    asyncio.create_task(safe_start_driver_consumer())
+
 
 @app.on_event("shutdown")
 async def shutdown():

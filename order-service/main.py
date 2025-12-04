@@ -143,26 +143,40 @@ async def create_order(order: OrderCreate, user=Depends(get_current_user), reque
     trace_id = request.state.trace_id
     order_id = str(uuid.uuid4())
 
+    # try to get a friendly user name from header or fallback to "You"/"Unknown"
+    header_user_name = None
+    try:
+        header_user_name = request.headers.get("x-user-name")
+    except Exception:
+        header_user_name = None
+
+    user_name = header_user_name or "You"
+
     await database.execute(
         orders.insert().values(
             id=order_id,
             user_id=order.user_id,
+            user_name=user_name,                      # NEW
             items=json.dumps(order.items),
             total=order.total,
             status="pending",
             payment_status="pending",
             driver_id=None,
+            driver_name=None,
+            delivered_at=None,
         )
     )
 
     order_data = {
         "id": order_id,
         "user_id": order.user_id,
+        "user_name": user_name,
         "items": order.items,
         "total_amount": order.total,
         "status": "pending",
         "payment_status": "pending",
         "driver_id": None,
+        "driver_name": None
     }
 
     # Use the new publish_order_created_event
