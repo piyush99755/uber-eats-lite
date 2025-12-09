@@ -33,7 +33,7 @@ export default function OrderCard({ order, onEdit, onPay, onDelete }: Props) {
           </span>
         )}
       </p>
-      <p><strong>Driver:</strong> {order.driver_id ?? "Unassigned"}</p>
+      <p><strong>Driver:</strong> {order.driver_name ?? order.driver_id ?? "Unassigned"}</p>
 
       <div className="flex gap-2 mt-3">
         <Button onClick={() => onEdit(order)} disabled={["assigned", "delivered"].includes(order.status)}>✏️ Edit</Button>

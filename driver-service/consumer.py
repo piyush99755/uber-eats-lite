@@ -35,7 +35,6 @@ DRIVER_QUEUE_URL = os.getenv("DRIVER_QUEUE_URL")
 
 session = aioboto3.Session()
 
-
 # ------------------------------- EVENT LOGGING -------------------------------
 async def log_event_to_db(event_type: str, payload: dict, source: str) -> bool:
     """
@@ -64,7 +63,6 @@ async def log_event_to_db(event_type: str, payload: dict, source: str) -> bool:
     )
     return True
 
-
 # ----------------- EVENT HANDLERS -----------------
 async def handle_order_created(payload: dict, event_id=None):
     order_id = payload.get("order_id") or event_id
@@ -77,7 +75,6 @@ async def handle_order_created(payload: dict, event_id=None):
 
     # Only log; do NOT assign driver yet, payment not guaranteed
     logger.info(f"[Driver Consumer] Order {order_id} received, waiting for payment completion.")
-
 
 async def handle_payment_completed(payload: dict, event_id=None):
     order_id = payload.get("order_id") or event_id
@@ -99,7 +96,6 @@ async def handle_payment_completed(payload: dict, event_id=None):
     else:
         logger.info(f"[Driver Consumer] Payment status not 'paid'. Skipping driver assignment.")
 
-
 async def handle_order_delivered(payload: dict, event_id=None):
     order_id = payload.get("order_id") or event_id
     logger.info(f"[Driver Consumer] Received order.delivered for order_id={order_id}, payload={payload}")
@@ -114,6 +110,7 @@ async def handle_order_delivered(payload: dict, event_id=None):
             .where(driver_orders.c.id == order_id)
             .values(status="delivered", delivered_at=datetime.utcnow())
         )
+
 async def handle_driver_failed(payload, event_id=None):
     print("[WARN] driver.failed event ignored — handler not implemented")
 
@@ -121,7 +118,6 @@ async def handle_driver_pending(payload, event_id=None):
     print("[WARN] driver.pending event ignored — handler not implemented")
 
 # ------------------------------- DRIVER ASSIGNMENT -------------------------------
-
 
 async def fetch_order_details(order_id: str):
     """Fetch complete order details from order-service."""
@@ -131,29 +127,17 @@ async def fetch_order_details(order_id: str):
             return None
         return r.json()
 
-
 async def assign_driver_to_order(order_id: str) -> bool:
     """
-    Full assignment function:
-    - fetch full order
-    - resolve user + driver name
-    - choose driver
-    - upsert driver_orders
-    - insert history
-    - emit driver.assigned + order.updated
-    - auto-deliver after delay (order.delivered)
+    Assigns a driver to an order, fetching the actual username and saving driver name properly.
     """
-
     now = datetime.utcnow()
 
     try:
-        # ==============================================================
-        # 0) Fetch full order details
-        # ==============================================================
+        # 1️⃣ Fetch full order details
         full_order = await fetch_order_details(order_id)
         if not full_order:
             logger.warning(f"[Driver Assignment] Could not fetch order {order_id}")
-
             await publish_event("driver.failed", {
                 "event_id": str(uuid.uuid4()),
                 "order_id": order_id,
@@ -161,67 +145,35 @@ async def assign_driver_to_order(order_id: str) -> bool:
             })
             return False
 
-        # ==============================================================
-        # 1) Extract USER info
-        # ==============================================================
-        user_obj = full_order.get("user") or {}
-        user_id = full_order.get("user_id") or user_obj.get("id") or user_obj.get("userId") or "unknown"
-        user_name = full_order.get("user_name") or user_obj.get("name") or user_obj.get("full_name") or user_obj.get("fullName") or "Unknown"
+        # 2️⃣ Extract USER info
+        user_id = str(full_order.get("user_id") or "unknown").strip()
 
-        # ==============================================================
-        # 2) Extract ITEMS safely (always list)
-        # ==============================================================
-        # ======================================
-        # Extract items (ALWAYS A PYTHON LIST)
-        # ======================================
+        # Fetch username from users table
+        user_record = await database.fetch_one(
+            "SELECT name FROM users WHERE id = :uid", values={"uid": user_id}
+        )
+        user_name = user_record["name"] if user_record else "Unknown"
+
+        # 3️⃣ Extract ITEMS safely
         items_raw = full_order.get("items", [])
-
         items = []
-
-        try:
-            # Case 1: already a list
-            if isinstance(items_raw, list):
-                items = items_raw
-
-            # Case 2: string that might be JSON
-            elif isinstance(items_raw, str):
-                try:
-                    parsed = json.loads(items_raw)
-                    items = parsed if isinstance(parsed, list) else []
-                except Exception:
-                    items = []
-
-            # Case 3: anything else → empty list
-            else:
+        if isinstance(items_raw, list):
+            items = [str(i) for i in items_raw]
+        elif isinstance(items_raw, str):
+            try:
+                parsed = json.loads(items_raw)
+                if isinstance(parsed, list):
+                    items = [str(i) for i in parsed]
+            except:
                 items = []
 
-        except Exception:
-            items = []
-
-        # FINAL SAFETY: ensure all elements are strings
-        items = [str(x) for x in items]
-
-
-        # ==============================================================
-        # 3) Extract TOTAL safely
-        # ==============================================================
-        total_raw = (
-            full_order.get("total")
-            or full_order.get("total_amount")
-            or full_order.get("amount")
-            or 0
-        )
-
+        # 4️⃣ Extract TOTAL safely
         try:
-            total = float(total_raw)
-            if total != total:  # NaN
-                total = 0.0
+            total = float(full_order.get("total") or full_order.get("total_amount") or full_order.get("amount") or 0)
         except:
             total = 0.0
 
-        # ==============================================================
-        # 4) Choose available driver
-        # ==============================================================
+        # 5️⃣ Choose available driver
         driver = await choose_available_driver()
         if not driver:
             await publish_event("driver.pending", {
@@ -231,23 +183,16 @@ async def assign_driver_to_order(order_id: str) -> bool:
             })
             return False
 
-        #convert Record → dict BEFORE accessing fields
-        driver = dict(driver)
-
         driver_id = driver["id"]
-        driver_name = driver.get("name") or driver.get("driver_name") or driver["id"]  # fallback
 
-
-
-        # ==============================================================
-        # 5) UPSERT driver_orders
-        # ==============================================================
-        existing = await database.fetch_one(
-            driver_orders.select().where(driver_orders.c.order_id == order_id)
+        # 🔍 Fetch real driver name from DB
+        driver_record = await database.fetch_one(
+            "SELECT name FROM drivers WHERE id = :id", {"id": driver_id}
         )
+        driver_name = driver_record["name"] if driver_record else "Unknown"
 
-        now = datetime.utcnow()
-
+        # 6️⃣ UPSERT driver_orders
+        existing = await database.fetch_one(driver_orders.select().where(driver_orders.c.order_id == order_id))
         if existing:
             await database.execute(
                 driver_orders.update()
@@ -280,9 +225,22 @@ async def assign_driver_to_order(order_id: str) -> bool:
                 )
             )
 
-        # ==============================================================
-        # 6) Insert into driver_orders_history
-        # ==============================================================
+        # 6.1️⃣ ALSO UPDATE ORDER-SERVICE ORDERS TABLE
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.put(
+                    f"http://order-service:8002/orders/{order_id}/assign-driver",
+                    json={
+                        "driver_id": driver_id,
+                        "driver_name": driver_name,
+                        "status": "assigned"
+                    }
+                )
+                logger.info(f"[Driver Assignment] Updated orders table for order {order_id}")
+        except Exception as e:
+            logger.error(f"[Driver Assignment] Failed to update order-service order: {e}")
+
+        # 7️⃣ Insert into driver_orders_history
         await database.execute(
             driver_orders_history.insert().values(
                 id=str(uuid.uuid4()),
@@ -299,16 +257,10 @@ async def assign_driver_to_order(order_id: str) -> bool:
             )
         )
 
-        # ==============================================================
-        # 7) Mark driver as busy
-        # ==============================================================
-        await database.execute(
-            drivers.update().where(drivers.c.id == driver_id).values(status="busy")
-        )
+        # 8️⃣ Mark driver as busy
+        await database.execute(drivers.update().where(drivers.c.id == driver_id).values(status="busy"))
 
-        # ==============================================================
-        # 8) Emit assigned events
-        # ==============================================================
+        # 9️⃣ Emit assigned events
         assigned_payload = {
             "event_id": str(uuid.uuid4()),
             "order_id": order_id,
@@ -331,32 +283,21 @@ async def assign_driver_to_order(order_id: str) -> bool:
             except:
                 logger.exception("[WS BROADCAST] failed")
 
-        logger.info(f"[Driver Assignment] Assigned driver {driver_id} → order {order_id}")
+        logger.info(f"[Driver Assignment] Assigned driver {driver_name} → order {order_id} (user: {user_name})")
 
-        # ==============================================================
-        # 9) AUTO-DELIVERY TASK
-        # ==============================================================
+        # 🔟 AUTO-DELIVERY TASK
         async def release_driver_later(did: str, oid: str):
             await asyncio.sleep(random.randint(60, 120))
-
             delivered_at = datetime.utcnow()
 
             try:
                 async with database.transaction():
-
-                    await database.execute(
-                        drivers.update().where(drivers.c.id == did).values(status="available")
-                    )
-
+                    await database.execute(drivers.update().where(drivers.c.id == did).values(status="available"))
                     await database.execute(
                         driver_orders.update()
                         .where(driver_orders.c.order_id == oid)
-                        .values(
-                            status="delivered",
-                            delivered_at=delivered_at
-                        )
+                        .values(status="delivered", delivered_at=delivered_at)
                     )
-
                     await database.execute(
                         driver_orders_history.insert().values(
                             id=str(uuid.uuid4()),
@@ -368,7 +309,8 @@ async def assign_driver_to_order(order_id: str) -> bool:
                             items=items,
                             total=total,
                             status="delivered",
-                            created_at=delivered_at
+                            created_at=delivered_at,
+                            updated_at=delivered_at
                         )
                     )
 
@@ -404,15 +346,12 @@ async def assign_driver_to_order(order_id: str) -> bool:
 
     except Exception as exc:
         logger.exception(f"[Driver Assignment] Failed for {order_id}: {exc}")
-
         await publish_event("driver.failed", {
             "event_id": str(uuid.uuid4()),
             "order_id": order_id,
             "reason": str(exc)
         })
-
         return False
-
 
 # ------------------------------- SQS CONSUMER -------------------------------
 async def poll_queue(queue_url: str, handlers: dict):
@@ -459,7 +398,6 @@ async def poll_queue(queue_url: str, handlers: dict):
                 logger.exception("SQS polling error")
                 await asyncio.sleep(5)
 
-
 # ------------------------------- STARTUP -------------------------------
 async def start_driver_consumer():
     if not DRIVER_QUEUE_URL:
@@ -476,7 +414,6 @@ async def start_driver_consumer():
         "driver.failed": handle_driver_failed,
         "driver.pending": handle_driver_pending,
     })
-
 
 if __name__ == "__main__":
     asyncio.run(start_driver_consumer())

@@ -8,17 +8,12 @@ import uuid
 async def choose_available_driver():
     """
     Picks the next available driver using FIFO.
-    (First driver who became available is used first.)
-
-    Later you can upgrade this to:
-    - least busy algorithm
-    - closest driver by distance
-    - load-balanced driver selection
+    Returns a dictionary with driver fields.
     """
     query = (
         select(drivers)
         .where(drivers.c.status == "available")
-        .order_by(drivers.c.id.asc())   # deterministic order
+        .order_by(drivers.c.id.asc())
     )
 
     available = await database.fetch_all(query)
@@ -27,11 +22,22 @@ async def choose_available_driver():
         print("[Driver Assignment] ❌ No available drivers found.")
         return None
 
-    # Always pick the first driver → predictable & fair
-    driver = available[0]
+    # Pick the first available driver
+    driver_record = available[0]
+
+    # Convert Record → dict safely
+    driver = {
+        "id": driver_record["id"],
+        "name": driver_record["name"],
+        "vehicle": driver_record["vehicle"],
+        "license_number": driver_record["license_number"],
+        "status": driver_record["status"]
+    }
 
     print(f"[Driver Assignment] Eligible driver selected → {driver['id']}")
     return driver
+
+
 
 
 async def notify_driver_pending(order_id: str):

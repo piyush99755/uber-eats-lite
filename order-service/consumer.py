@@ -161,7 +161,15 @@ async def handle_driver_assigned(payload: dict, event_id=None):
 
     # Broadcast and publish
     await manager.broadcast(ws_payload)
-    await publish_event("order.updated", {"event_id": str(event_id or payload.get("event_id") or order_id), **ws_payload})
+    await publish_event(
+    "order.updated",
+    {
+        "event_id": str(event_id or payload.get("event_id") or order_id),
+        **ws_payload
+    }
+)
+
+
 
 
 async def handle_order_delivered(payload: dict, event_id=None):
