@@ -126,6 +126,23 @@ async def fetch_order_details(order_id: str):
         if r.status_code != 200:
             return None
         return r.json()
+    
+async def fetch_order_details_with_retry(order_id: str, retries=8, delay=0.5):
+    """Retry fetching an order because payment events can arrive before order is saved."""
+    for attempt in range(retries):
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(f"http://order-service:8002/orders/{order_id}")
+                if r.status_code == 200:
+                    return r.json()
+        except Exception:
+            pass
+
+        await asyncio.sleep(delay)
+
+    logger.error(f"[Driver Assignment] Order {order_id} NOT FOUND after retrying {retries} times.")
+    return None
+
 
 async def assign_driver_to_order(order_id: str) -> bool:
     """
@@ -135,7 +152,8 @@ async def assign_driver_to_order(order_id: str) -> bool:
 
     try:
         # 1️⃣ Fetch full order details
-        full_order = await fetch_order_details(order_id)
+        full_order = await fetch_order_details_with_retry(order_id)
+
         if not full_order:
             logger.warning(f"[Driver Assignment] Could not fetch order {order_id}")
             await publish_event("driver.failed", {

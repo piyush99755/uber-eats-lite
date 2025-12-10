@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import stripe
 import jwt
+import httpx
 from database import database, metadata, engine, init_db
 from models import payments
 from events import publish_event, connected_clients, broadcast_payment_event
@@ -118,38 +119,109 @@ async def create_payment_intent(request: PaymentRequest, user=Depends(get_curren
 
 @app.post("/confirm-payment")
 async def confirm_payment(req: ConfirmPaymentRequest, user=Depends(get_current_user)):
+    """
+    Confirm a Stripe PaymentIntent, save the payment record idempotently,
+    update the order-service immediately (so UI updates), then publish
+    payment.completed for async driver assignment.
+    """
     trace_id = user["trace_id"]
-    intent = stripe.PaymentIntent.retrieve(req.payment_intent_id)
+
+    # 1) Retrieve PaymentIntent from Stripe
+    try:
+        intent = stripe.PaymentIntent.retrieve(req.payment_intent_id)
+    except Exception as e:
+        logger.error(f"[TRACE {trace_id}] Stripe retrieval error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve payment intent")
+
     if intent.status != "succeeded":
+        logger.warning(f"[TRACE {trace_id}] PaymentIntent not succeeded: {intent.status}")
         raise HTTPException(status_code=400, detail="Payment not successful")
-    amount = intent.amount / 100
 
-    existing = await database.fetch_one(payments.select().where(payments.c.order_id == req.order_id))
-    if existing:
-        payment_id = existing["id"]
-        logger.warning(f"[TRACE {trace_id}] Payment already exists for order {req.order_id}, skipping insert")
-    else:
-        payment_id = str(uuid4())
-        await database.execute(
-            payments.insert().values(
-                id=payment_id,
-                order_id=req.order_id,
-                amount=amount,
-                status="paid",
-                user_id=user["id"]
-            )
+    amount = (intent.amount or 0) / 100.0
+
+    # 2) Idempotent insert/update into `payments` table
+    try:
+        existing = await database.fetch_one(
+            payments.select().where(payments.c.order_id == req.order_id)
         )
-        logger.info(f"[TRACE {trace_id}] Payment saved to DB for order {req.order_id}")
 
-    await publish_event("payment.completed", {
-        "payment_id": payment_id,
-        "order_id": req.order_id,
-        "status": "paid",
-        "amount": amount,
-        "user_id": user["id"]
-    }, trace_id=trace_id)
+        if existing:
+            payment_id = existing["id"]
+            logger.info(
+                f"[TRACE {trace_id}] Payment already exists for order {req.order_id} (id={payment_id}), skipping insert."
+            )
+        else:
+            payment_id = str(uuid4())
+            await database.execute(
+                payments.insert().values(
+                    id=payment_id,
+                    order_id=req.order_id,
+                    amount=amount,
+                    status="paid",
+                    user_id=user["id"]
+                )
+            )
+            logger.info(
+                f"[TRACE {trace_id}] Payment saved to DB for order {req.order_id} (payment_id={payment_id})"
+            )
+    except Exception as e:
+        logger.exception(f"[TRACE {trace_id}] DB error while saving payment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save payment record")
 
-    logger.info(f"[TRACE {trace_id}] Payment confirmed for order {req.order_id}")
+    # 3) Synchronously update order-service (ensures UI stops showing 'pending')
+    ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order-service:8002")
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            headers = {
+                "x-user-id": user["id"],
+                "x-user-role": user.get("role", "service"),
+                "x-trace-id": trace_id,
+            }
+
+            resp = await client.put(
+                f"{ORDER_SERVICE_URL}/orders/{req.order_id}",
+                json={"payment_status": "paid", "status": "paid"},
+                headers=headers,
+            )
+
+            if resp.status_code not in (200, 201, 204):
+                logger.warning(
+                    f"[TRACE {trace_id}] order-service returned {resp.status_code}: {resp.text}"
+                )
+            else:
+                logger.info(
+                    f"[TRACE {trace_id}] Order-service updated order {req.order_id} → paid"
+                )
+
+    except Exception as e:
+        logger.exception(
+            f"[TRACE {trace_id}] Failed to update order-service for {req.order_id}: {e}"
+        )
+        # do NOT raise — event will still be published
+
+    # 4) Publish event so driver-service can assign a driver
+    try:
+        await publish_event(
+            "payment.completed",
+            {
+                "payment_id": payment_id,
+                "order_id": req.order_id,
+                "status": "paid",
+                "amount": amount,
+                "user_id": user["id"],
+            },
+            trace_id=trace_id,
+        )
+
+        logger.info(
+            f"[TRACE {trace_id}] payment.completed published for order {req.order_id}"
+        )
+    except Exception as e:
+        logger.exception(
+            f"[TRACE {trace_id}] Failed to publish payment.completed for {req.order_id}: {e}"
+        )
+
     return {"message": "Payment confirmed and order marked as paid"}
 
 @app.get("/payments")
